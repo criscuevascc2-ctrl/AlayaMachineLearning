@@ -2,7 +2,7 @@ name: every-20-min
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # cada 20 min (UTC)
+    - cron: "1/20 * * * *"   # cada 20 min (UTC) # 01,21,41 UTC
   workflow_dispatch:
 
 concurrency:
