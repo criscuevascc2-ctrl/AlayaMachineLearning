@@ -1,0 +1,75 @@
+name: every-20-min
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # se ejecuta cada 20 minutos (UTC)
+  workflow_dispatch:         # permite lanzarlo a mano desde Actions
+
+concurrency:
+  group: every-20-min
+  cancel-in-progress: false  # no mates uno que siga corriendo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    # Si tus secrets están en un Environment (ej. "ci"), descomenta:
+    # environment: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Cache HuggingFace hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-
+
+      # Prefetch del modelo (opcional; tu wrapper también descarga on-demand)
+      - name: Prefetch ONNX (optional)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - << 'PY'
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+  repo_id="krizzcs2/sentiment-robertuito-v1",
+  filename="weights/model.onnx",
+  token="${{ secrets.HF_TOKEN }}",
+  repo_type="model",
+  # revision="v1",
+)
+print("Prefetch OK")
+PY
+
+      - name: Run 20-min tasks
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          SENT_HF_REPO_ID: krizzcs2/sentiment-robertuito-v1
+          SENT_ONNX_FILENAME: weights/model.onnx
+          # SENT_HF_REVISION: v1   # si fijaste un tag en HF
+        run: |
+          python scrap_media.py
+          python ins_media.py
+          python comment_media.py
+          python cuenta_din.py
