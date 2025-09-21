@@ -136,6 +136,8 @@ def list_media_last_month(limit_per_page=100, max_pages=10):
     return items
 
 # =================== DB Helpers ===================
+COMMENT_ROLLUP_FIELDS = ["comments_total", "comments_pos", "comments_neu", "comments_neg", "sentiment_avg_score"]
+
 def upsert_rows(table: str, rows: List[dict], conflict: str) -> int:
     """UPSERT por lotes."""
     if not rows:
@@ -179,6 +181,27 @@ def has_sentiment(rec: Dict) -> bool:
         (rec.get("sentiment_score") is not None) and
         (rec.get("sentiment_conf") is not None)
     )
+
+
+def latest_insights_missing_rollup(media_id: str) -> bool:
+    """True si la snapshot mas reciente en ig_media_insights tiene campos de comentarios vacios."""
+    try:
+        res = (
+            sb.table("ig_media_insights")
+            .select("taken_at," + ",".join(COMMENT_ROLLUP_FIELDS))
+            .eq("media_id", media_id)
+            .order("taken_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        print(f"[WARN] rollup check fallo media={media_id}: {e}")
+        return False
+    rows = res.data or []
+    if not rows:
+        return False
+    latest = rows[0]
+    return any(latest.get(field) is None for field in COMMENT_ROLLUP_FIELDS)
 
 # =================== Comentarios & Sentimiento ===================
 FIELDS_COM = "id,text,username,timestamp,like_count"
@@ -381,8 +404,11 @@ def sync_media_comments_with_sentiment(media_id: str) -> Tuple[int, int, int]:
     n_new += upsert_rows("ig_media_comments", replies_rows, "comment_id")
     n_senti= update_sentiment_only(senti_updates)
 
-    # ---- 4) Rollup -> insights (solo si hubo cambios o ALWAYS_ROLLUP=1)
-    if ALWAYS_ROLLUP or (n_new > 0 or n_senti > 0):
+    # ---- 4) Rollup -> insights (force if latest snapshot missing values)
+    should_rollup = bool(ALWAYS_ROLLUP) or (n_new > 0 or n_senti > 0)
+    if not should_rollup:
+        should_rollup = latest_insights_missing_rollup(media_id)
+    if should_rollup:
         try:
             r = sb.rpc("ig_rollup_comments_to_insights_media", {"_media_id": media_id}).execute()
             print(f"[ROLLUP] media={media_id} filas_afectadas={r.data}")
