@@ -52,6 +52,6 @@ jobs:
         run: |
           python scrap_media.py
           python ins_media.py
-          python comment_media.py
+          python coment_media.py
           python cuenta_est.py
           python cuenta_din.py
