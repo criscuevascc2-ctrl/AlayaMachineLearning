@@ -1,10 +1,9 @@
-# .github/workflows/schedule-debug.yml
 name: schedule-debug
 
 on:
   schedule:
     - cron: "1/20 * * * *"   # :01, :21, :41 UTC
-  workflow_dispatch:          # también permite correrlo a mano
+  workflow_dispatch:          # permite correrlo a mano
 
 permissions:
   actions: read
@@ -43,31 +42,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/repos/${{ github.repository }}" \
-          | python - <<'PY'
-import sys, json
-d = json.load(sys.stdin)
-print(json.dumps({k:d.get(k) for k in ["name","private","fork","default_branch"]}, indent=2))
-PY
+          gh api repos/${{ github.repository }} --jq '{name:.name, private:.private, fork:.fork, default_branch:.default_branch}'
 
       - name: List workflows and states (enabled/disabled)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
-          | python - <<'PY'
-import sys, json
-d = json.load(sys.stdin)
-for w in d.get("workflows", []):
-    print(f"- {w['name']:<25} state={w['state']}  path={w['path']}  id={w['id']}")
-PY
-
-      - name: Environment (compact)
-        run: |
-          env | sort | sed -n '1,120p'
+          gh api repos/${{ github.repository }}/actions/workflows --jq '.workflows[] | {name:.name, state:.state, path:.path, id:.id}'
