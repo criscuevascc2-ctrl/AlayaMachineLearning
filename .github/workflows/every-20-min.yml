@@ -2,18 +2,18 @@ name: every-20-min
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # se ejecuta cada 20 minutos (UTC)
-  workflow_dispatch:         # permite lanzarlo a mano desde Actions
+    - cron: "*/20 * * * *"   # cada 20 min (UTC)
+  workflow_dispatch:
 
 concurrency:
   group: every-20-min
-  cancel-in-progress: false  # no mates uno que siga corriendo
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    # Si tus secrets están en un Environment (ej. "ci"), descomenta:
+    # Si usas Environment secrets, descomenta:
     # environment: ci
     steps:
       - uses: actions/checkout@v4
@@ -26,37 +26,36 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', '**/equirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - name: Install deps (with fallback)
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f equirements.txt ]; then
+            pip install -r equirements.txt
+          else
+            echo "❌ No requirements file found" && exit 1
+          fi
 
       - name: Cache HuggingFace hub
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: ${{ runner.os }}-hf-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-hf-${{ hashFiles('**/requirements.txt', '**/equirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-hf-
 
-      # Prefetch del modelo (opcional; tu wrapper también descarga on-demand)
+      # Prefetch del modelo (opcional)
       - name: Prefetch ONNX (optional)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python - << 'PY'
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-  repo_id="krizzcs2/sentiment-robertuito-v1",
-  filename="weights/model.onnx",
-  token="${{ secrets.HF_TOKEN }}",
-  repo_type="model",
-  # revision="v1",
-)
-print("Prefetch OK")
-PY
+          python -c "from huggingface_hub import hf_hub_download; \
+          hf_hub_download(repo_id='krizzcs2/sentiment-robertuito-v1', filename='weights/model.onnx', \
+          token='${{ secrets.HF_TOKEN }}', repo_type='model'); print('Prefetch OK')"
 
       - name: Run 20-min tasks
         env:
@@ -67,9 +66,10 @@ PY
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           SENT_HF_REPO_ID: krizzcs2/sentiment-robertuito-v1
           SENT_ONNX_FILENAME: weights/model.onnx
-          # SENT_HF_REVISION: v1   # si fijaste un tag en HF
+          # SENT_HF_REVISION: v1   # si taggeaste
         run: |
           python scrap_media.py
           python ins_media.py
           python comment_media.py
           python cuenta_din.py
+          python cuenta_est.py
