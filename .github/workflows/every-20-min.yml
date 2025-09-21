@@ -2,7 +2,7 @@ name: every-20-min
 
 on:
   schedule:
-    - cron: "1/20 * * * *"   # cada 20 min (UTC) # 01,21,41 UTC
+    - cron: "1/20 * * * *"   # 01,21,41 UTC (si quieres 00,20,40 cambia a */20)
   workflow_dispatch:
 
 concurrency:
@@ -13,7 +13,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    # environment: ci   # <- si pusiste secrets en un Environment llamado 'ci', descomenta esta línea
+    env:
+      TZ: America/Santiago
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -21,28 +23,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - name: Install deps (livianas)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements-20m.txt
 
       - name: Cache HuggingFace hub
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: ${{ runner.os }}-hf-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-hf-${{ hashFiles('requirements-20m.txt') }}
           restore-keys: |
             ${{ runner.os }}-hf-
 
       - name: Run 20-min tasks
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
