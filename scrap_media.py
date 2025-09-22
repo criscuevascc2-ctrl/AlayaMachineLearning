@@ -154,7 +154,7 @@ def select_existing_subset(ids: list[str]) -> dict:
     if not ids:
         return {}
     res = sb.table("ig_media") \
-        .select("media_id,hashtags,mentions,caption_lang,video_duration_sec,media_width,media_height,storage_path,media_product_type,timestamp_utc") \
+        .select("media_id,hashtags,mentions,caption_lang,video_duration_sec,media_width,media_height,storage_path,media_product_type,timestamp_utc,media_url,media_url_refreshed_at") \
         .in_("media_id", ids).execute()
     out = {}
     for row in (res.data or []):
@@ -492,6 +492,7 @@ def build_row_from_media(m: dict) -> dict:
         "caption_lang": DEFAULT_LANG,
         "permalink": m.get("permalink"),
         "media_url": m.get("media_url"),
+        "media_url_refreshed_at": now_iso,
         "thumbnail_url": m.get("thumbnail_url"),
         "like_count_init": m.get("like_count"),
         "comments_count_init": m.get("comments_count"),
@@ -624,6 +625,9 @@ def needs_update(existing: dict | None, row: dict) -> bool:
     if not existing:
         return True
     e = existing
+    product = (row.get("media_product_type") or e.get("media_product_type") or "").upper()
+    if product != "STORIES":
+        return True
     if (e.get("hashtags") in (None, [], {})) and row.get("hashtags"): return True
     if (e.get("mentions") in (None, [], {})) and row.get("mentions"): return True
     if (e.get("caption_lang") in (None, "")) and row.get("caption_lang"): return True
@@ -631,6 +635,7 @@ def needs_update(existing: dict | None, row: dict) -> bool:
     if (e.get("media_width") in (None, 0)) and row.get("media_width"): return True
     if (e.get("media_height") in (None, 0)) and row.get("media_height"): return True
     return False
+
 
 # ================== BACKFILL MEDIA (FEED/REELS + CAROUSEL) ==================
 def backfill_media(max_items: int | None = None) -> int:
@@ -706,6 +711,7 @@ def build_row_from_story(s: dict, storage_path: str | None, info: dict | None = 
         "caption_lang": DEFAULT_LANG,
         "permalink": None,
         "media_url": s.get("media_url"),
+        "media_url_refreshed_at": now_iso,
         "thumbnail_url": s.get("thumbnail_url"),
         "like_count_init": None, "comments_count_init": None,
         "username": None, "is_comment_enabled": None,
