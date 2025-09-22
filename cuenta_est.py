@@ -15,6 +15,8 @@ Campos cubiertos:
 - media_published_day               -> conteo de /media creados ese día
 - content_mix_day                   -> {"REELS":n, "FEED":m, ...} desde media_product_type del día
 - hashtags_used_day                 -> total de hashtags en captions
+- reels_watch_time_sum_ms_day       -> suma video_view_total_time (ms) de reels publicados ese dia
+- story_interactions_day            -> total de interacciones (replies/taps/exits) en stories del dia
 - audience_*                        -> follower_demographics (country/city/age/gender) con metric_type=total_value
 
 Append-only si hay cambios:
@@ -245,15 +247,19 @@ def fetch_follow_unfollow_day() -> dict:
 # ================== Demografía (snapshot) ==================
 def fetch_audience_demographics() -> dict:
     """
-    follower_demographics con metric_type=total_value y breakdown válidos:
-    country, city, age, gender. Guardamos audience_gender_age = {"age": {...}, "gender": {...}}.
+    follower_demographics con metric_type=total_value y breakdown validos:
+    country, city, age, gender. Devuelve dicts listos para guardar:
+      - audience_country: {"CL": 100, "AR": 50, ...}
+      - audience_city: {"Santiago": 80, "Buenos Aires": 20, ...}
+      - audience_gender_age: {"age": {...}, "gender": {...}}
     """
     out = {
         "audience_country": None,
         "audience_city": None,
         "audience_gender_age": None,
-        "audience_locale": None,  # no soportado en v23
+        "audience_locale": None,  # ya no soportado en v23
     }
+
     def _demo(breakdown: str):
         try:
             res = ig_get(f"{IG_USER_ID}/insights", {
@@ -265,40 +271,56 @@ def fetch_audience_demographics() -> dict:
             data = res.get("data") or []
             if not data:
                 return None
-            v = pick_last_value(data[0])
-            return v if isinstance(v, dict) else None
+
+            tv = (data[0] or {}).get("total_value") or {}
+            bks = tv.get("breakdowns") or []
+            if not bks:
+                return None
+            results = bks[0].get("results") or []
+
+            parsed: dict[str, int | None] = {}
+            for r in results:
+                keys = r.get("dimension_values") or []
+                if not keys:
+                    continue
+                key = str(keys[0])
+                try:
+                    value = int(r.get("value", 0))
+                except Exception:
+                    value = None
+                parsed[key] = value
+            return parsed if parsed else None
         except Exception as e:
             print(f"[WARN] follower_demographics/{breakdown}: {e}")
             return None
+
     country = _demo("country")
-    city    = _demo("city")
-    age     = _demo("age")
-    gender  = _demo("gender")
+    city = _demo("city")
+    age = _demo("age")
+    gender = _demo("gender")
+
     out["audience_country"] = country
-    out["audience_city"]    = city
+    out["audience_city"] = city
+
     ga = {}
-    if isinstance(age, dict): ga["age"] = age
-    if isinstance(gender, dict): ga["gender"] = gender
+    if isinstance(age, dict):
+        ga["age"] = age
+    if isinstance(gender, dict):
+        ga["gender"] = gender
     out["audience_gender_age"] = ga if ga else None
+
     return out
 
 # ================== Media del día ==================
-HASH_RE = re.compile(r"#(\w+)", flags=re.UNICODE)
-
-def fetch_media_counts_for_day() -> tuple[int, dict | None, int | None]:
+def _list_media_for_day() -> list[dict]:
     """
-    Devuelve:
-      - media_published_day (int)
-      - content_mix_day (dict por media_product_type)
-      - hashtags_used_day (int total en captions del día)
+    Devuelve media publicados durante DATE_UTC (UTC).
     """
+    fields = "id,caption,timestamp,media_type,media_product_type"
+    params = {"fields": fields, "limit": 100}
     start_dt = datetime.fromtimestamp(SINCE_TS, tz=timezone.utc)
-    end_dt   = datetime.fromtimestamp(UNTIL_TS, tz=timezone.utc)
-    count = 0
-    mix: dict[str,int] = {}
-    hashtags_total = 0
-
-    params = {"fields": "id,caption,timestamp,media_type,media_product_type", "limit": 100}
+    end_dt = datetime.fromtimestamp(UNTIL_TS, tz=timezone.utc)
+    items: list[dict] = []
     for item in ig_paginate_items(f"{IG_USER_ID}/media", params=params):
         ts = item.get("timestamp")
         if not ts:
@@ -307,13 +329,28 @@ def fetch_media_counts_for_day() -> tuple[int, dict | None, int | None]:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
             continue
-
         if dt >= end_dt:
-            pass  # más reciente que nuestro rango; sigue
-        elif dt < start_dt:
-            break  # ya pasamos el rango
+            continue
+        if dt < start_dt:
+            break
+        items.append(item)
+    return items
 
-        count += 1
+HASH_RE = re.compile(r"#(\w+)", flags=re.UNICODE)
+
+def fetch_media_counts_for_day(media_items: list[dict] | None = None) -> tuple[int, dict | None, int | None]:
+    """
+    Devuelve:
+      - media_published_day (int)
+      - content_mix_day (dict por media_product_type)
+      - hashtags_used_day (int total en captions del dia)
+    """
+    items = media_items if media_items is not None else _list_media_for_day()
+    count = len(items)
+    mix: dict[str, int] = {}
+    hashtags_total = 0
+
+    for item in items:
         mpt = (item.get("media_product_type") or "UNKNOWN").upper()
         mix[mpt] = mix.get(mpt, 0) + 1
 
@@ -321,6 +358,80 @@ def fetch_media_counts_for_day() -> tuple[int, dict | None, int | None]:
         hashtags_total += len(HASH_RE.findall(cap))
 
     return count, (mix or None), (hashtags_total if hashtags_total > 0 else None)
+
+def fetch_reels_watch_time_for_day(media_items: list[dict] | None = None) -> int | None:
+    """
+    Suma video_view_total_time (ms) de los reels publicados durante DATE_UTC.
+    """
+    items = media_items if media_items is not None else _list_media_for_day()
+    total = 0
+    has_value = False
+
+    for item in items:
+        product_type = (item.get("media_product_type") or "").upper()
+        if product_type != "REELS":
+            continue
+        media_id = item.get("id")
+        if not media_id:
+            continue
+        try:
+            res = ig_get(f"{media_id}/insights", {"metric": "video_view_total_time"})
+            data = res.get("data") or []
+            if not data:
+                continue
+            v = pick_last_value(data[0])
+            if isinstance(v, (int, float)):
+                total += int(v)
+                has_value = True
+        except Exception as e:
+            print(f"[WARN] reel watch time {media_id}: {e}")
+
+    return total if has_value else None
+
+def fetch_story_interactions_for_day(media_items: list[dict] | None = None) -> int | None:
+    """
+    Suma replies, taps_forward, taps_back, exits (y shares si aplica) para stories del dia.
+    """
+    items = media_items if media_items is not None else _list_media_for_day()
+    total = 0
+    has_value = False
+    metrics_variants = [
+        ["replies", "shares", "taps_forward", "taps_back", "exits"],
+        ["replies", "taps_forward", "taps_back", "exits"],
+    ]
+
+    for item in items:
+        product_type = (item.get("media_product_type") or "").upper()
+        media_type = (item.get("media_type") or "").upper()
+        if product_type not in ("STORIES",) and media_type != "STORY":
+            continue
+        media_id = item.get("id")
+        if not media_id:
+            continue
+
+        res = None
+        last_exc: Exception | None = None
+        for metrics in metrics_variants:
+            joined = ",".join(metrics)
+            if not joined:
+                continue
+            try:
+                res = ig_get(f"{media_id}/insights", {"metric": joined})
+                break
+            except Exception as exc:
+                last_exc = exc
+        if res is None:
+            if last_exc is not None:
+                print(f"[WARN] story interactions {media_id}: {last_exc}")
+            continue
+
+        for metric_item in res.get("data") or []:
+            v = pick_last_value(metric_item)
+            if isinstance(v, (int, float)):
+                total += int(v)
+                has_value = True
+
+    return total if has_value else None
 
 # ================== DB helpers ==================
 def upsert_daily_row(row: dict):
@@ -419,7 +530,10 @@ def run_daily_snapshot():
             print(f"[WARN] fallback followers_count: {e}")
 
     # Media del día
-    media_published_day, content_mix_day, hashtags_used_day = fetch_media_counts_for_day()
+    media_items = _list_media_for_day()
+    media_published_day, content_mix_day, hashtags_used_day = fetch_media_counts_for_day(media_items)
+    reels_watch_time_sum_ms_day = fetch_reels_watch_time_for_day(media_items)
+    story_interactions_day = fetch_story_interactions_for_day(media_items)
 
     # Demografía snapshot
     demo = fetch_audience_demographics()
@@ -460,8 +574,8 @@ def run_daily_snapshot():
 
         "media_published_day": int(media_published_day) if isinstance(media_published_day, int) else None,
         "content_mix_day": content_mix_day,   # dict o None
-        "reels_watch_time_sum_ms_day": None,
-        "story_interactions_day": None,
+        "reels_watch_time_sum_ms_day": int(reels_watch_time_sum_ms_day) if isinstance(reels_watch_time_sum_ms_day, int) else None,
+        "story_interactions_day": int(story_interactions_day) if isinstance(story_interactions_day, int) else None,
         "hashtags_used_day": int(hashtags_used_day) if isinstance(hashtags_used_day, int) else None,
         "collab_posts_day": None,
         "paid_partnerships_day": None,
