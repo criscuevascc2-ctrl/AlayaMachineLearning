@@ -57,7 +57,6 @@ UPSERT_BATCH     = int(os.getenv("UPSERT_BATCH", "500"))
 API_BUDGET       = int(os.getenv("COMMENTS_API_BUDGET", "2000"))
 SENT_MODEL_NAME  = os.getenv("SENT_MODEL", "onnx-robertuito-int8").strip()
 ALWAYS_ROLLUP    = int(os.getenv("ALWAYS_ROLLUP", "0"))
-USE_DB_MEDIA_CACHE = int(os.getenv("USE_DB_MEDIA_CACHE", "1"))
 
 # Ventana temporal: últimos 30 días
 NOW_UTC     = datetime.now(timezone.utc)
@@ -118,53 +117,13 @@ def probe_token_basic():
 
 def list_media_last_month(limit_per_page=100, max_pages=10):
     """Lista medios del último mes con campos básicos (incluye comments_count)."""
-    if USE_DB_MEDIA_CACHE:
-        try:
-            limit_total = max(limit_per_page, 1) * max(max_pages, 1)
-            query = (
-                sb.table("ig_media")
-                .select("media_id,media_type,media_product_type,timestamp_utc,comments_count_init,comments_count_latest,permalink")
-                .eq("ig_user_id", IG_USER_ID)
-                .gte("timestamp_utc", CUTOFF_UTC.isoformat())
-                .order("timestamp_utc", desc=True)
-                .limit(limit_total)
-                .execute()
-            )
-            cached_items = []
-            for row in query.data or []:
-                ts_raw = row.get("timestamp_utc")
-                if not ts_raw:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                except Exception:
-                    continue
-                if dt < CUTOFF_UTC:
-                    continue
-                ts_iso = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                comments_count = row.get("comments_count_latest") or row.get("comments_count_init")
-                cached_items.append({
-                    "id": row.get("media_id"),
-                    "media_type": row.get("media_type"),
-                    "media_product_type": row.get("media_product_type"),
-                    "comments_count": comments_count,
-                    "permalink": row.get("permalink"),
-                    "timestamp": ts_iso,
-                    "_ts_iso": ts_iso,
-                })
-            cached_items = [m for m in cached_items if m.get("id")]
-            if cached_items:
-                cached_items.sort(key=lambda x: x["_ts_iso"], reverse=True)
-                return cached_items
-        except Exception as exc:
-            print(f"[WARN] media cache fallback: {exc}")
     fields = "id,media_type,media_product_type,timestamp,comments_count,permalink"
     items, pages = [], 0
     data = ig_get(f"{IG_USER_ID}/media", {"fields": fields, "limit": limit_per_page})
     while True:
         for m in data.get("data", []):
             ts_iso = to_utc_iso(m["timestamp"])
-            ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(ts_iso.replace("Z","+00:00"))
             if ts >= CUTOFF_UTC:
                 m["_ts_iso"] = ts_iso
                 items.append(m)
