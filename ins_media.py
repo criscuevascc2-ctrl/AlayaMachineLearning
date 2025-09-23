@@ -14,7 +14,7 @@ Permisos mínimos:
 """
 
 import os, json, time, re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -38,6 +38,7 @@ API_BUDGET  = int(os.getenv("INSIGHTS_API_BUDGET", "180"))
 
 # Máximo de medios a procesar en esta corrida
 MAX_MEDIA   = int(os.getenv("INSIGHTS_MAX_MEDIA", "1200"))
+USE_STORY_CACHE = int(os.getenv("USE_STORY_CACHE", "1"))
 
 # Tamaño de batch Graph (máx 50)
 BATCH_SIZE  = min(int(os.getenv("GRAPH_BATCH_SIZE", "50")), 50)
@@ -169,7 +170,33 @@ def fetch_candidates_from_db(limit: int) -> list[dict]:
 
 def fetch_active_stories() -> list[dict]:
     """Trae STORIES activas (no histórico)."""
-    items = []
+    if USE_STORY_CACHE:
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            query = (
+                sb.table("ig_media")
+                .select("media_id,video_duration_sec")
+                .eq("ig_user_id", IG_USER_ID)
+                .eq("media_product_type", "STORIES")
+                .gte("last_seen_at", cutoff)
+                .limit(500)
+                .execute()
+            )
+            data = query.data or []
+            if data:
+                return [
+                    {
+                        "media_id": row["media_id"],
+                        "surface": "STORIES",
+                        "video_duration_sec": row.get("video_duration_sec"),
+                    }
+                    for row in data
+                    if row.get("media_id")
+                ]
+        except Exception as exc:
+            print(f"[WARN] story cache fallback: {exc}")
+
+    items: list[dict] = []
     params = {"fields": "id,timestamp", "limit": 100}
     try:
         data = ig_get(f"{IG_USER_ID}/stories", params)
@@ -182,7 +209,8 @@ def fetch_active_stories() -> list[dict]:
         for s in data.get("data", []):
             items.append({"media_id": s["id"], "surface": "STORIES", "video_duration_sec": None})
         next_url = (data.get("paging") or {}).get("next")
-        if not next_url: break
+        if not next_url:
+            break
         data = ig_get(next_url, raw_url=True)
     return items
 
