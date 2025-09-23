@@ -367,7 +367,16 @@ def snapshot_insights(max_media: int | None = None) -> int:
         print(f"[WARN] fetch_active_stories: {e}")
         stories_active = []
 
-    items = (candidates + stories_active)[:max_media]
+    # Deduplicate when stories appear in both sources
+    combined = candidates + stories_active
+    unique_items, seen_media = [], set()
+    for it in combined:
+        mid = str(it["media_id"])
+        if mid in seen_media:
+            continue
+        seen_media.add(mid)
+        unique_items.append(it)
+    items = unique_items[:max_media]
     if not items:
         print("[INFO] Sin candidatos en ventana temporal.")
         return 0
@@ -418,3 +427,5 @@ if __name__ == "__main__":
         print(f"[DB] Sunset 28d: {r.data} medios apagados")
     except Exception as e:
         print(f"[WARN] Sunset 28d falló: {e}")
+
+
