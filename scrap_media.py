@@ -40,8 +40,8 @@ DEBUG_DIR   = (os.getenv("DEBUG_DIR") or "./_debug").strip()
 DEFAULT_LANG = (os.getenv("DEFAULT_LANG") or "es").strip().lower()
 
 # Stories cache
-STORIES_BUCKET   = os.getenv("STORIES_BUCKET", "ig_stories")
-STORIES_TTL_DAYS = int(os.getenv("STORIES_TTL_DAYS", "14"))
+STORIES_BUCKET   = os.getenv("STORIES_BUCKET", "Historias")
+STORIES_TTL_DAYS = int(os.getenv("STORIES_TTL_DAYS", "90"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "60"))
 
 # Límite opcional para evitar descargar archivos gigantes (0 = sin límite)
@@ -406,10 +406,13 @@ def guess_ext_and_type(url: str, content_type_hdr: str | None) -> tuple[str, str
 
 def storage_upload_bytes(bucket_name: str, path: str, content: bytes, content_type: str, upsert=True):
     b = sb.storage.from_(bucket_name)
+    options = {"content-type": content_type or "application/octet-stream"}
+    if upsert:
+        options["upsert"] = "true"
     try:
-        return b.upload(path, content, {"contentType": content_type, "upsert": upsert})
+        return b.upload(path, content, options)
     except TypeError:
-        return b.upload(path=path, file=content, file_options={"contentType": content_type, "upsert": upsert})
+        return b.upload(path=path, file=content, file_options=options)
 
 def storage_remove_paths(bucket_name: str, paths: list[str]):
     if not paths: return
@@ -750,15 +753,25 @@ def process_active_stories() -> int:
         need_w = not prev or (prev.get("media_width") in (None, 0))
         need_h = not prev or (prev.get("media_height") in (None, 0))
         need_d = not prev or (prev.get("video_duration_sec") in (None, 0, 0.0))
+        need_meta = need_w or need_h or need_d
 
-        if (not storage_path) or need_w or need_h or need_d:
+        media_url = s.get("media_url")
+
+        if not storage_path and media_url:
             try:
-                storage_path, info = cache_story_asset_and_probe(s["id"], s.get("media_url"))
+                storage_path, info = cache_story_asset_and_probe(s["id"], media_url)
             except Exception:
+                info = None
+            if info is None and need_meta and media_url:
                 try:
-                    info = probe_url_dims_and_duration(s.get("media_url"))
+                    info = probe_url_dims_and_duration(media_url)
                 except Exception:
                     info = None
+        elif need_meta and media_url:
+            try:
+                info = probe_url_dims_and_duration(media_url)
+            except Exception:
+                info = None
 
         row = build_row_from_story(s, storage_path, info)
         rows_to_upsert.append(prune_nulls_for_patch(row) if prev else row)
@@ -789,3 +802,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[ERROR] El script falló: {e}")
         raise
+
