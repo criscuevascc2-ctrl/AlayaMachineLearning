@@ -13,13 +13,14 @@ Permisos mínimos:
   instagram_basic, instagram_manage_insights
 """
 
-import os, json, time
+import os, json, time, re
 from datetime import datetime, timezone
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
 
 # ================== CONFIG ==================
 load_dotenv(".env.local")
@@ -208,9 +209,12 @@ def fetch_insights_batch(items: list[dict]) -> dict:
 
         for m in chunk:
             metrics_str, fb_str = pick_metrics(m["surface"])
+            rel_url = f"{m['media_id']}/insights?metric={metrics_str}"
+            if m["surface"] == "STORIES":
+                rel_url += "&period=day"
             subreqs.append({
                 "method": "GET",
-                "relative_url": f"{m['media_id']}/insights?metric={metrics_str}"
+                "relative_url": rel_url
             })
             mids.append(m["media_id"])
             fallbacks.append((m["surface"], metrics_str, fb_str))
@@ -264,6 +268,8 @@ def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | No
             return {}
         try:
             params = {"metric": metrics, "access_token": IG_TOKEN}
+            if surface == "STORIES":
+                params["period"] = "day"
             r = SESSION.get(f"{BASE}/{media_id}/insights", params=params, timeout=25)
             API_CALLS += 1
             if r.status_code == 429:
@@ -313,8 +319,38 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
     return row
 
 def upsert_insights_rows(rows: list[dict]):
-    if not rows: return
-    sb.table("ig_media_insights").upsert(rows, on_conflict="media_id,taken_at").execute()
+    if not rows:
+        return
+
+    remaining = list(rows)
+    while remaining:
+        try:
+            sb.table("ig_media_insights").upsert(remaining, on_conflict="media_id,taken_at").execute()
+            return
+        except APIError as e:
+            payload = getattr(e, "response", None) or (e.args[0] if e.args else {})
+            message = ""
+            code = ""
+            if isinstance(payload, dict):
+                message = (payload.get("message") or "")
+                code = payload.get("code") or ""
+            else:
+                message = str(payload or e)
+            message_lower = message.lower()
+            if "muy temprano" in message_lower:
+                match = re.search(r"media\s+(\d+)", message)
+                media_id = match.group(1) if match else None
+                if not media_id and remaining:
+                    media_id = str(remaining[0].get("media_id"))
+                if media_id:
+                    print(f"[WARN] skip snapshot media={media_id}: {message}")
+                    remaining = [r for r in remaining if str(r.get("media_id")) != str(media_id)]
+                    if not remaining:
+                        return
+                    continue
+            print(f"[ERROR] upsert failed (code={code}): {message}")
+            raise
+
 
 # ================== MAIN ==================
 def snapshot_insights(max_media: int | None = None) -> int:
