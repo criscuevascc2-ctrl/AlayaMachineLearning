@@ -2,7 +2,7 @@ name: every-20-min
 
 on:
   schedule:
-    - cron: "1/20 * * * *"   # 01,21,41 UTC (si quieres 00,20,40 cambia a */20)
+    - cron: "1/20 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -16,17 +16,31 @@ jobs:
     env:
       TZ: America/Santiago
       PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      USE_DB_MEDIA_CACHE: "1"
+      USE_STORY_CACHE: "1"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      SENT_HF_REPO_ID: krizzcs2/sentiment-robertuito-v1
+      SENT_ONNX_FILENAME: weights/model.onnx
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements-20m.txt
 
-      - name: Install deps (livianas)
+      - name: Install deps (20m)
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements-20m.txt
+          pip install -r requirements-20m.txt
 
       - name: Cache HuggingFace hub
         uses: actions/cache@v4
@@ -36,18 +50,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-hf-
 
-      - name: Run 20-min tasks
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          SENT_HF_REPO_ID: krizzcs2/sentiment-robertuito-v1
-          SENT_ONNX_FILENAME: weights/model.onnx
+      - name: Run scrap_media
+        run: python scrap_media.py
+
+      - name: Run insights/comments/account tasks
+        shell: bash
         run: |
-          python scrap_media.py
+          set -euo pipefail
           python ins_media.py
           python coment_media.py
           python cuenta_est.py
