@@ -47,6 +47,7 @@ ACCOUNT_TZ = (os.getenv("ACCOUNT_TZ") or "America/Santiago").strip()
 API_BUDGET = int(os.getenv("IG_API_BUDGET", "200"))
 DEBUG_JSON = (os.getenv("DEBUG_JSON") or "0").strip() == "1"
 ALWAYS_INSERT = (os.getenv("ALWAYS_INSERT") or "0").strip() == "1"  # solo si hay snapshot_at
+USE_DB_MEDIA_CACHE = int(os.getenv("USE_DB_MEDIA_CACHE", "1"))
 
 # Si quieres fijar la fecha (UTC): export DATE_UTC=YYYY-MM-DD
 DATE_UTC_STR = (os.getenv("DATE_UTC") or "").strip()
@@ -316,10 +317,48 @@ def _list_media_for_day() -> list[dict]:
     """
     Devuelve media publicados durante DATE_UTC (UTC).
     """
-    fields = "id,caption,timestamp,media_type,media_product_type"
-    params = {"fields": fields, "limit": 100}
     start_dt = datetime.fromtimestamp(SINCE_TS, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(UNTIL_TS, tz=timezone.utc)
+
+    if USE_DB_MEDIA_CACHE:
+        try:
+            query = (
+                sb.table("ig_media")
+                .select("media_id,caption,timestamp_utc,media_type,media_product_type")
+                .eq("ig_user_id", IG_USER_ID)
+                .gte("timestamp_utc", start_dt.isoformat())
+                .lt("timestamp_utc", end_dt.isoformat())
+                .order("timestamp_utc")
+                .limit(500)
+                .execute()
+            )
+            items: list[dict] = []
+            for row in query.data or []:
+                ts_raw = row.get("timestamp_utc")
+                if not ts_raw:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if not (start_dt <= dt < end_dt):
+                    continue
+                ts_iso = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                items.append({
+                    "id": row.get("media_id"),
+                    "caption": row.get("caption"),
+                    "timestamp": ts_iso,
+                    "media_type": row.get("media_type"),
+                    "media_product_type": row.get("media_product_type"),
+                })
+            items = [m for m in items if m.get("id")]
+            if items:
+                return items
+        except Exception as exc:
+            print(f"[WARN] media cache fallback: {exc}")
+
+    fields = "id,caption,timestamp,media_type,media_product_type"
+    params = {"fields": fields, "limit": 100}
     items: list[dict] = []
     for item in ig_paginate_items(f"{IG_USER_ID}/media", params=params):
         ts = item.get("timestamp")
