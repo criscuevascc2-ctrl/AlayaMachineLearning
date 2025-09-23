@@ -14,7 +14,7 @@ Requisitos:
 """
 
 import os, json, time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -32,6 +32,7 @@ API_VERSION= (os.getenv("API_VERSION") or "v23.0").strip()
 ACCOUNT_TZ = (os.getenv("ACCOUNT_TZ") or "America/Santiago").strip()
 API_BUDGET = int(os.getenv("IG_API_BUDGET", "120"))
 DEBUG_JSON = (os.getenv("DEBUG_JSON") or "0").strip() == "1"
+USE_STORY_CACHE = int(os.getenv("USE_STORY_CACHE", "1"))
 
 # Redis opcional para DMs (si lo usas)
 REDIS_URL  = (os.getenv("REDIS_URL") or "").strip()
@@ -259,6 +260,24 @@ def fetch_online_followers_now() -> tuple[int | None, int | None]:
         return None, None
 
 def fetch_stories_active_count() -> int:
+    if USE_STORY_CACHE:
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            query = (
+                sb.table("ig_media")
+                .select("media_id")
+                .eq("ig_user_id", IG_USER_ID)
+                .eq("media_product_type", "STORIES")
+                .gte("last_seen_at", cutoff)
+                .limit(500)
+                .execute()
+            )
+            data = query.data or []
+            if data:
+                return len([row for row in data if row.get("media_id")])
+        except Exception as exc:
+            print(f"[WARN] stories cache fallback: {exc}")
+
     try:
         n = 0
         for _ in ig_paginate_items(f"{IG_USER_ID}/stories", params={"fields": "id", "limit": 100}):
