@@ -77,8 +77,12 @@ FIELD_MAP = {
     "shares": "shares",
     "replies": "replies",
     "taps_forward": "taps_forward",
+    "tap_forward": "taps_forward",
     "taps_back": "taps_back",
+    "tap_back": "taps_back",
     "exits": "exits",
+    "tap_exit": "exits",
+    "swipe_forward": "swipe_forward",
     "plays": "plays",
     # Watch-time (API devuelve ms; guardamos en *_ms)
     "ig_reels_avg_watch_time": "ig_reels_avg_watch_time_ms",
@@ -199,19 +203,21 @@ def fetch_insights_batch(items: list[dict]) -> dict:
     items: [{media_id, surface, video_duration_sec}]
     Devuelve: dict { media_id: {metric_name: value, ...}, ... }
     - POST / (batch) en chunks de 50.
-    - Si sub-respuesta falla, hace fallback individual con set mínimo.
+    - Si sub-respuesta falla, hace fallback individual con set minimo.
     """
     results: dict[str, dict] = {}
 
     for i in range(0, len(items), BATCH_SIZE):
         chunk = items[i:i+BATCH_SIZE]
         subreqs, mids, fallbacks = [], [], []
+        chunk_story_ids: list[str] = []
 
         for m in chunk:
             metrics_str, fb_str = pick_metrics(m["surface"])
             rel_url = f"{m['media_id']}/insights?metric={metrics_str}"
             if m["surface"] == "STORIES":
                 rel_url += "&period=day"
+                chunk_story_ids.append(str(m["media_id"]))
             subreqs.append({
                 "method": "GET",
                 "relative_url": rel_url
@@ -225,6 +231,10 @@ def fetch_insights_batch(items: list[dict]) -> dict:
             print(f"[WARN] batch HTTP error: {e}")
             for mid, (surf, primary, fb) in zip(mids, fallbacks):
                 results[mid] = fetch_insights_single(mid, surf, primary, fb)
+            if chunk_story_ids:
+                nav_map = fetch_story_navigation_metrics(chunk_story_ids)
+                for sid, nav in nav_map.items():
+                    results.setdefault(sid, {}).update(nav)
             continue
 
         for k, mid in enumerate(mids):
@@ -239,7 +249,7 @@ def fetch_insights_batch(items: list[dict]) -> dict:
                         name = e.get("name")
                         val  = (e.get("values") or [{}])[0].get("value")
                         if name == "video_views":
-                            name = "views"   # normalización
+                            name = "views"   # normalizacion
                         met[name] = val
                     results[mid] = met
                     continue
@@ -252,7 +262,132 @@ def fetch_insights_batch(items: list[dict]) -> dict:
 
         time.sleep(0.1)  # respiro corto
 
+        if chunk_story_ids:
+            nav_map = fetch_story_navigation_metrics(chunk_story_ids)
+            for sid, nav in nav_map.items():
+                results.setdefault(sid, {}).update(nav)
+
     return results
+
+
+def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
+    metrics: dict[str, int] = {}
+    if not isinstance(payload, dict):
+        return metrics
+
+    data = payload.get("data") or []
+    for entry in data:
+        values = entry.get("values") or []
+        for val_entry in values:
+            value = val_entry.get("value")
+            if isinstance(value, dict):
+                for key, number in value.items():
+                    if isinstance(number, (int, float)):
+                        metrics[str(key).lower()] = number
+            breakdowns = val_entry.get("breakdowns") or []
+            for breakdown in breakdowns:
+                dims = breakdown.get("dimension_values") or []
+                if dims:
+                    key = str(dims[0]).lower()
+                    val = breakdown.get("value")
+                    if isinstance(val, (int, float)):
+                        metrics[key] = val
+    return metrics
+
+
+def fetch_story_navigation_metrics(media_ids: list[str]) -> dict[str, dict]:
+    nav_results: dict[str, dict] = {}
+    if not media_ids:
+        return nav_results
+
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for mid in media_ids:
+        smid = str(mid)
+        if smid not in seen:
+            seen.add(smid)
+            dedup.append(smid)
+
+    for i in range(0, len(dedup), BATCH_SIZE):
+        batch_ids = dedup[i:i+BATCH_SIZE]
+        subreqs = [
+            {
+                "method": "GET",
+                "relative_url": f"{mid}/insights?metric=navigation&breakdown=story_navigation_action_type"
+            }
+            for mid in batch_ids
+        ]
+        try:
+            resp = ig_post("", {"batch": json.dumps(subreqs, ensure_ascii=False)})
+        except requests.HTTPError as e:
+            print(f"[WARN] story navigation batch HTTP error: {e}")
+            for mid in batch_ids:
+                single = fetch_story_navigation_single(mid)
+                if single:
+                    nav_results[mid] = single
+            continue
+
+        for idx, mid in enumerate(batch_ids):
+            entry = resp[idx] if idx < len(resp) else {}
+            code = entry.get("code")
+            body = entry.get("body")
+            payload = None
+            if code == 200 and body:
+                try:
+                    payload = json.loads(body)
+                except Exception as ex:
+                    print(f"[WARN] story navigation parse body media={mid}: {ex} | body[:160]={str(body)[:160]}")
+            nav_map = parse_story_navigation_metrics(payload)
+            if nav_map:
+                nav_results[mid] = nav_map
+            else:
+                single = fetch_story_navigation_single(mid)
+                if single:
+                    nav_results[mid] = single
+
+        time.sleep(0.05)
+
+    return nav_results
+
+
+def fetch_story_navigation_single(media_id: str) -> dict[str, int]:
+    global API_CALLS
+    if API_CALLS >= API_BUDGET:
+        return {}
+
+    params = {
+        "metric": "navigation",
+        "breakdown": "story_navigation_action_type",
+        "access_token": IG_TOKEN,
+    }
+
+    try:
+        r = SESSION.get(f"{BASE}/{media_id}/insights", params=params, timeout=25)
+    except requests.RequestException as ex:
+        print(f"[WARN] story navigation single request failed media={media_id}: {ex}")
+        return {}
+
+    API_CALLS += 1
+    if r.status_code == 429:
+        time.sleep(60)
+        try:
+            r = SESSION.get(r.url, timeout=25)
+        except requests.RequestException as ex:
+            print(f"[WARN] story navigation retry failed media={media_id}: {ex}")
+            return {}
+        API_CALLS += 1
+
+    if r.status_code != 200:
+        print(f"[WARN] story navigation single HTTP {r.status_code} media={media_id}: {r.text[:180]}")
+        return {}
+
+    try:
+        payload = r.json()
+    except Exception as ex:
+        print(f"[WARN] story navigation single parse media={media_id}: {ex}")
+        return {}
+
+    return parse_story_navigation_metrics(payload)
 
 def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | None, fallback_str: str | None) -> dict:
     """Fallback individual (1 request) priorizando el set completo disponible."""
@@ -303,6 +438,7 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
         "reach": None, "impressions": None, "views": None, "total_interactions": None,
         "likes": None, "comments": None, "saved": None, "shares": None, "replies": None,
         "taps_forward": None, "taps_back": None, "exits": None,
+        "swipe_forward": None,
         "ig_reels_avg_watch_time_ms": None, "ig_reels_video_view_total_time_ms": None,
         "plays": None,
         "video_duration_sec": None,
@@ -313,6 +449,34 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
         dest = FIELD_MAP.get(name)
         if dest is not None:
             row[dest] = val
+
+    # For stories, use tap_forward as a share fallback so "Reenviar" counts are stored.
+    if (surface or "").upper() == "STORIES":
+        tap_forward_raw = (metrics_dict or {}).get("tap_forward")
+        if tap_forward_raw is not None:
+            if isinstance(tap_forward_raw, (int, float)):
+                tap_forward_val = tap_forward_raw
+            else:
+                try:
+                    tap_forward_val = float(tap_forward_raw)
+                except (TypeError, ValueError):
+                    tap_forward_val = None
+            if tap_forward_val is not None:
+                share_raw = row.get("shares")
+                if isinstance(share_raw, (int, float)):
+                    share_val = share_raw
+                elif share_raw is None:
+                    share_val = None
+                else:
+                    try:
+                        share_val = float(share_raw)
+                    except (TypeError, ValueError):
+                        share_val = None
+                combined = tap_forward_val if share_val is None else share_val + tap_forward_val
+                if isinstance(combined, float) and combined.is_integer():
+                    combined = int(combined)
+                row["shares"] = combined
+
     if video_duration_sec:
         try: row["video_duration_sec"] = float(video_duration_sec)
         except: pass
