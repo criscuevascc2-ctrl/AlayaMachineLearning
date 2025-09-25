@@ -55,10 +55,10 @@ API_CALLS = 0
 METRICS_FEED    = "views,reach,total_interactions,saved,likes,comments,shares"
 
 # REELS (video)
-METRICS_REELS   = "views,reach,total_interactions,saved,likes,comments,shares,ig_reels_avg_watch_time,ig_reels_video_view_total_time"
+METRICS_REELS   = "views,reach,total_interactions,saved,likes,comments,shares,ig_reels_avg_watch_time,ig_reels_video_view_total_time,plays"
 
-# STORIES (activas)
-METRICS_STORIES = "views,reach,replies,taps_forward,taps_back,exits"
+# STORIES (activas) -> SOLO válidas en metric=..., no incluir taps_* ni exits aquí
+METRICS_STORIES = "views,reach,replies"
 
 # Fallbacks mínimos (si falla el batch) — también SIN impressions
 FALLBACK_FEED     = "views,reach,total_interactions"
@@ -76,18 +76,36 @@ FIELD_MAP = {
     "comments": "comments",
     "shares": "shares",
     "replies": "replies",
-    "taps_forward": "taps_forward",
-    "tap_forward": "taps_forward",
-    "taps_back": "taps_back",
-    "tap_back": "taps_back",
-    "exits": "exits",
-    "tap_exit": "exits",
-    "swipe_forward": "swipe_forward",
     "plays": "plays",
-    # Watch-time (API devuelve ms; guardamos en *_ms)
+
+    # Story navigation → columnas propias (NO shares)
+    "tap_forward": "taps_forward",
+    "taps_forward": "taps_forward",
+    "swipe_forward": "taps_forward",  # Next story también a taps_forward
+    "tap_back": "taps_back",
+    "taps_back": "taps_back",
+    "tap_exit": "exits",
+    "exits": "exits",
+
+    # Reels watch-time (API devuelve ms; guardamos en *_ms)
     "ig_reels_avg_watch_time": "ig_reels_avg_watch_time_ms",
     "ig_reels_video_view_total_time": "ig_reels_video_view_total_time_ms",
 }
+
+# Columnas permitidas para upsert (sanitización anti-PGRST204)
+ALLOWED_COLUMNS = {
+    "media_id","taken_at","media_product_type",
+    "reach","impressions","views","total_interactions",
+    "likes","comments","saved","shares","replies",
+    "taps_forward","taps_back","exits",
+    "ig_reels_avg_watch_time_ms","ig_reels_video_view_total_time_ms",
+    "plays","video_duration_sec",
+    "comments_total","comments_pos","comments_neu","comments_neg","sentiment_avg_score",
+}
+
+def sanitize_row_for_upsert(row: dict) -> dict:
+    """Elimina llaves que no existan en la tabla (evita PGRST204)."""
+    return {k: v for k, v in row.items() if k in ALLOWED_COLUMNS}
 
 # ================== HTTP session (keep-alive + retry) ==================
 def make_session() -> requests.Session:
@@ -135,11 +153,8 @@ def ig_post(path, data=None):
         raise requests.HTTPError(f"{r.status_code}: {r.text[:300]}")
     return r.json()
 
-# ================== Util — order con nulls first (compat varias versiones) ==================
+# ================== Util — order con nulls first ==================
 def order_nulls_first(req, column: str):
-    """
-    Intenta .order(..., nullsfirst=True); si la versión no soporta, intenta nulls_first; si no, sin flag.
-    """
     try:
         return req.order(column, desc=False, nullsfirst=True)
     except TypeError:
@@ -150,17 +165,10 @@ def order_nulls_first(req, column: str):
 
 # ================== Candidatos ==================
 def fetch_candidates_from_db(limit: int) -> list[dict]:
-    """
-    Lee candidatos desde la vista v_ig_media_due:
-      - Vencidos (next_due_at <= now())
-      - >28 días SIN snapshot (para 1 captura y apagar)
-    Devuelve: [{media_id, surface, video_duration_sec}]
-    """
     q = sb.table("v_ig_media_due").select(
         "media_id,media_product_type,video_duration_sec,next_due_at"
     )
     q = order_nulls_first(q, "next_due_at").limit(limit).execute()
-
     rows = q.data or []
     return [
         {
@@ -178,7 +186,6 @@ def fetch_active_stories() -> list[dict]:
     try:
         data = ig_get(f"{IG_USER_ID}/stories", params)
     except Exception as e:
-        # No rompas la corrida si no tienes permisos para stories
         print(f"[WARN] fetch_active_stories GET failed: {e}")
         return items
 
@@ -196,6 +203,152 @@ def pick_metrics(surface: str) -> tuple[str, str]:
     if s == "REELS":   return METRICS_REELS,   FALLBACK_REELS
     if s == "STORIES": return METRICS_STORIES, FALLBACK_STORIES
     return METRICS_FEED, FALLBACK_FEED
+
+# ================== Story navigation parsing ==================
+def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
+    """Convierte el payload de metric=navigation a claves normalizadas.
+    Soporta:
+      - values[].breakdowns[].dimension_values/value
+      - total_value.breakdowns[].results[].dimension_values/value
+    """
+    metrics: dict[str, int] = {}
+    if not isinstance(payload, dict):
+        return metrics
+
+    def norm(key: str) -> str:
+        k = (key or "").strip().lower()
+        # Meta suele devolver: SWIPE_FORWARD, TAP_FORWARD, TAP_BACK, TAP_EXIT
+        if k in ("swipe_forward", "tap_forward", "tap_back", "tap_exit"):
+            return k
+        return k
+
+    data = payload.get("data") or []
+
+    for entry in data:
+        # ---- 1) Formato clásico: values[].breakdowns[] ----
+        values = entry.get("values") or []
+        for val_entry in values:
+            # values[].value puede ser dict agregando métricas
+            val_obj = val_entry.get("value")
+            if isinstance(val_obj, dict):
+                for key, number in val_obj.items():
+                    if isinstance(number, (int, float)):
+                        metrics[norm(str(key))] = number
+            # o bien venir en 'breakdowns' dentro de cada values[]
+            for br in (val_entry.get("breakdowns") or []):
+                dims = br.get("dimension_values") or []
+                if dims:
+                    key = norm(str(dims[0]))
+                    val = br.get("value")
+                    if isinstance(val, (int, float)):
+                        metrics[key] = val
+
+        # ---- 2) Formato que estás recibiendo: total_value.breakdowns.results[] ----
+        total_value = entry.get("total_value") or {}
+        for br in (total_value.get("breakdowns") or []):
+            for res in (br.get("results") or []):
+                dims = res.get("dimension_values") or []
+                if dims:
+                    key = norm(str(dims[0]))
+                    val = res.get("value")
+                    if isinstance(val, (int, float)):
+                        metrics[key] = val
+
+    return metrics
+
+
+def fetch_story_navigation_single(media_id: str) -> dict[str, int]:
+    global API_CALLS
+    if API_CALLS >= API_BUDGET:
+        return {}
+
+    params = {
+        "metric": "navigation",
+        "breakdown": "story_navigation_action_type",
+        "access_token": IG_TOKEN,
+    }
+
+    try:
+        r = SESSION.get(f"{BASE}/{media_id}/insights", params=params, timeout=25)
+    except requests.RequestException as ex:
+        print(f"[WARN] story navigation single request failed media={media_id}: {ex}")
+        return {}
+
+    API_CALLS += 1
+    if r.status_code == 429:
+        time.sleep(60)
+        try:
+            r = SESSION.get(r.url, timeout=25)
+        except requests.RequestException as ex:
+            print(f"[WARN] story navigation retry failed media={media_id}: {ex}")
+            return {}
+        API_CALLS += 1
+
+    if r.status_code != 200:
+        print(f"[WARN] story navigation single HTTP {r.status_code} media={media_id}: {r.text[:180]}")
+        return {}
+
+    try:
+        payload = r.json()
+    except Exception as ex:
+        print(f"[WARN] story navigation single parse media={media_id}: {ex}")
+        return {}
+
+    return parse_story_navigation_metrics(payload)
+
+def fetch_story_navigation_metrics(media_ids: list[str]) -> dict[str, dict]:
+    nav_results: dict[str, dict] = {}
+    if not media_ids:
+        return nav_results
+
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for mid in media_ids:
+        smid = str(mid)
+        if smid not in seen:
+            seen.add(smid)
+            dedup.append(smid)
+
+    for i in range(0, len(dedup), BATCH_SIZE):
+        batch_ids = dedup[i:i+BATCH_SIZE]
+        subreqs = [
+            {
+                "method": "GET",
+                "relative_url": f"{mid}/insights?metric=navigation&breakdown=story_navigation_action_type"
+            }
+            for mid in batch_ids
+        ]
+        try:
+            resp = ig_post("", {"batch": json.dumps(subreqs, ensure_ascii=False)})
+        except requests.HTTPError as e:
+            print(f"[WARN] story navigation batch HTTP error: {e}")
+            for mid in batch_ids:
+                single = fetch_story_navigation_single(mid)
+                if single:
+                    nav_results[mid] = single
+            continue
+
+        for idx, mid in enumerate(batch_ids):
+            entry = resp[idx] if idx < len(resp) else {}
+            code = entry.get("code")
+            body = entry.get("body")
+            payload = None
+            if code == 200 and body:
+                try:
+                    payload = json.loads(body)
+                except Exception as ex:
+                    print(f"[WARN] story navigation parse body media={mid}: {ex} | body[:160]={str(body)[:160]}")
+            nav_map = parse_story_navigation_metrics(payload)
+            if nav_map:
+                nav_results[mid] = nav_map
+            else:
+                single = fetch_story_navigation_single(mid)
+                if single:
+                    nav_results[mid] = single
+
+        time.sleep(0.05)
+
+    return nav_results
 
 # ================== Batch de insights ==================
 def fetch_insights_batch(items: list[dict]) -> dict:
@@ -269,126 +422,6 @@ def fetch_insights_batch(items: list[dict]) -> dict:
 
     return results
 
-
-def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
-    metrics: dict[str, int] = {}
-    if not isinstance(payload, dict):
-        return metrics
-
-    data = payload.get("data") or []
-    for entry in data:
-        values = entry.get("values") or []
-        for val_entry in values:
-            value = val_entry.get("value")
-            if isinstance(value, dict):
-                for key, number in value.items():
-                    if isinstance(number, (int, float)):
-                        metrics[str(key).lower()] = number
-            breakdowns = val_entry.get("breakdowns") or []
-            for breakdown in breakdowns:
-                dims = breakdown.get("dimension_values") or []
-                if dims:
-                    key = str(dims[0]).lower()
-                    val = breakdown.get("value")
-                    if isinstance(val, (int, float)):
-                        metrics[key] = val
-    return metrics
-
-
-def fetch_story_navigation_metrics(media_ids: list[str]) -> dict[str, dict]:
-    nav_results: dict[str, dict] = {}
-    if not media_ids:
-        return nav_results
-
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for mid in media_ids:
-        smid = str(mid)
-        if smid not in seen:
-            seen.add(smid)
-            dedup.append(smid)
-
-    for i in range(0, len(dedup), BATCH_SIZE):
-        batch_ids = dedup[i:i+BATCH_SIZE]
-        subreqs = [
-            {
-                "method": "GET",
-                "relative_url": f"{mid}/insights?metric=navigation&breakdown=story_navigation_action_type"
-            }
-            for mid in batch_ids
-        ]
-        try:
-            resp = ig_post("", {"batch": json.dumps(subreqs, ensure_ascii=False)})
-        except requests.HTTPError as e:
-            print(f"[WARN] story navigation batch HTTP error: {e}")
-            for mid in batch_ids:
-                single = fetch_story_navigation_single(mid)
-                if single:
-                    nav_results[mid] = single
-            continue
-
-        for idx, mid in enumerate(batch_ids):
-            entry = resp[idx] if idx < len(resp) else {}
-            code = entry.get("code")
-            body = entry.get("body")
-            payload = None
-            if code == 200 and body:
-                try:
-                    payload = json.loads(body)
-                except Exception as ex:
-                    print(f"[WARN] story navigation parse body media={mid}: {ex} | body[:160]={str(body)[:160]}")
-            nav_map = parse_story_navigation_metrics(payload)
-            if nav_map:
-                nav_results[mid] = nav_map
-            else:
-                single = fetch_story_navigation_single(mid)
-                if single:
-                    nav_results[mid] = single
-
-        time.sleep(0.05)
-
-    return nav_results
-
-
-def fetch_story_navigation_single(media_id: str) -> dict[str, int]:
-    global API_CALLS
-    if API_CALLS >= API_BUDGET:
-        return {}
-
-    params = {
-        "metric": "navigation",
-        "breakdown": "story_navigation_action_type",
-        "access_token": IG_TOKEN,
-    }
-
-    try:
-        r = SESSION.get(f"{BASE}/{media_id}/insights", params=params, timeout=25)
-    except requests.RequestException as ex:
-        print(f"[WARN] story navigation single request failed media={media_id}: {ex}")
-        return {}
-
-    API_CALLS += 1
-    if r.status_code == 429:
-        time.sleep(60)
-        try:
-            r = SESSION.get(r.url, timeout=25)
-        except requests.RequestException as ex:
-            print(f"[WARN] story navigation retry failed media={media_id}: {ex}")
-            return {}
-        API_CALLS += 1
-
-    if r.status_code != 200:
-        print(f"[WARN] story navigation single HTTP {r.status_code} media={media_id}: {r.text[:180]}")
-        return {}
-
-    try:
-        payload = r.json()
-    except Exception as ex:
-        print(f"[WARN] story navigation single parse media={media_id}: {ex}")
-        return {}
-
-    return parse_story_navigation_metrics(payload)
-
 def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | None, fallback_str: str | None) -> dict:
     """Fallback individual (1 request) priorizando el set completo disponible."""
     global API_CALLS
@@ -438,44 +471,19 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
         "reach": None, "impressions": None, "views": None, "total_interactions": None,
         "likes": None, "comments": None, "saved": None, "shares": None, "replies": None,
         "taps_forward": None, "taps_back": None, "exits": None,
-        "swipe_forward": None,
         "ig_reels_avg_watch_time_ms": None, "ig_reels_video_view_total_time_ms": None,
         "plays": None,
         "video_duration_sec": None,
         "comments_total": None, "comments_pos": None, "comments_neu": None,
         "comments_neg": None, "sentiment_avg_score": None,
     }
+    # Mapeo directo
     for name, val in (metrics_dict or {}).items():
         dest = FIELD_MAP.get(name)
         if dest is not None:
             row[dest] = val
 
-    # For stories, use tap_forward as a share fallback so "Reenviar" counts are stored.
-    if (surface or "").upper() == "STORIES":
-        tap_forward_raw = (metrics_dict or {}).get("tap_forward")
-        if tap_forward_raw is not None:
-            if isinstance(tap_forward_raw, (int, float)):
-                tap_forward_val = tap_forward_raw
-            else:
-                try:
-                    tap_forward_val = float(tap_forward_raw)
-                except (TypeError, ValueError):
-                    tap_forward_val = None
-            if tap_forward_val is not None:
-                share_raw = row.get("shares")
-                if isinstance(share_raw, (int, float)):
-                    share_val = share_raw
-                elif share_raw is None:
-                    share_val = None
-                else:
-                    try:
-                        share_val = float(share_raw)
-                    except (TypeError, ValueError):
-                        share_val = None
-                combined = tap_forward_val if share_val is None else share_val + tap_forward_val
-                if isinstance(combined, float) and combined.is_integer():
-                    combined = int(combined)
-                row["shares"] = combined
+    # NO mezclar navegación en shares (semánticamente no corresponde)
 
     if video_duration_sec:
         try: row["video_duration_sec"] = float(video_duration_sec)
@@ -486,7 +494,7 @@ def upsert_insights_rows(rows: list[dict]):
     if not rows:
         return
 
-    remaining = list(rows)
+    remaining = [sanitize_row_for_upsert(r) for r in rows]  # <-- sanitiza antes
     while remaining:
         try:
             sb.table("ig_media_insights").upsert(remaining, on_conflict="media_id,taken_at").execute()
@@ -514,7 +522,6 @@ def upsert_insights_rows(rows: list[dict]):
                     continue
             print(f"[ERROR] upsert failed (code={code}): {message}")
             raise
-
 
 # ================== MAIN ==================
 def snapshot_insights(max_media: int | None = None) -> int:
@@ -556,6 +563,7 @@ def snapshot_insights(max_media: int | None = None) -> int:
         if not mdict:
             empties += 1
         row = build_insights_row(mid, surf, mdict, dur)
+        row = sanitize_row_for_upsert(row)  # seguridad extra
         buffer.append(row); processed += 1
 
         if len(buffer) >= 200:
@@ -591,5 +599,3 @@ if __name__ == "__main__":
         print(f"[DB] Sunset 28d: {r.data} medios apagados")
     except Exception as e:
         print(f"[WARN] Sunset 28d falló: {e}")
-
-
