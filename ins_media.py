@@ -1,19 +1,19 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Snapshot de Insights (Instagram Graph API v23.0) con Batch + fallback.
 - Selecciona candidatos desde la VISTA v_ig_media_due (vencidos + >28d sin snapshot).
-- Pide insights por BATCH (máx 50 sub-requests por POST).
-- Si un sub-request falla, hace 1 GET individual con set mínimo por superficie.
+- Pide insights por BATCH (mÃ¡x 50 sub-requests por POST).
+- Si un sub-request falla, hace 1 GET individual con set mÃ­nimo por superficie.
 - Guarda en public.ig_media_insights (PK: media_id, taken_at).
-- Al final, ejecuta el RPC ig_media_sunset_28d() para “apagar” >28d con snapshot.
+- Al final, ejecuta el RPC ig_media_sunset_28d() para â€œapagarâ€ >28d con snapshot.
 
 Requisitos:
   pip install python-dotenv requests supabase python-dateutil
-Permisos mínimos:
+Permisos mÃ­nimos:
   instagram_basic, instagram_manage_insights
 """
 
-import os, json, time, re
+import os, json, time, re, math
 from datetime import datetime, timezone
 import requests
 from requests.adapters import HTTPAdapter
@@ -30,16 +30,16 @@ IG_TOKEN   = (os.getenv("IG_ACCESS_TOKEN") or "").strip()
 SB_URL     = (os.getenv("SUPABASE_URL") or "").strip()
 SB_KEY     = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
-# Ventana histórica solo se usa para otras rutas; aquí trabajamos con la vista due
+# Ventana histÃ³rica solo se usa para otras rutas; aquÃ­ trabajamos con la vista due
 CUTOFF_DAYS = int(os.getenv("INSIGHTS_CUTOFF_DAYS", "30"))
 
 # Presupuesto de llamadas HTTP (POST batch cuenta 1; GET fallback cuenta 1)
 API_BUDGET  = int(os.getenv("INSIGHTS_API_BUDGET", "180"))
 
-# Máximo de medios a procesar en esta corrida
+# MÃ¡ximo de medios a procesar en esta corrida
 MAX_MEDIA   = int(os.getenv("INSIGHTS_MAX_MEDIA", "1200"))
 
-# Tamaño de batch Graph (máx 50)
+# TamaÃ±o de batch Graph (mÃ¡x 50)
 BATCH_SIZE  = min(int(os.getenv("GRAPH_BATCH_SIZE", "50")), 50)
 
 # Graph API v23.0
@@ -50,22 +50,22 @@ assert IG_USER_ID and IG_TOKEN and SB_URL and SB_KEY, "Faltan IG_USER_ID / IG_AC
 sb: Client = create_client(SB_URL, SB_KEY)
 API_CALLS = 0
 
-# ================== MÉTRICAS por superficie (SIN 'impressions' en v22+) ==================
+# ================== MÃ‰TRICAS por superficie (SIN 'impressions' en v22+) ==================
 # FEED (imagen o video no-reels)
 METRICS_FEED    = "views,reach,total_interactions,saved,likes,comments,shares"
 
 # REELS (video)
 METRICS_REELS   = "views,reach,total_interactions,saved,likes,comments,shares,ig_reels_avg_watch_time,ig_reels_video_view_total_time,plays"
 
-# STORIES (activas) -> SOLO válidas en metric=..., no incluir taps_* ni exits aquí
+# STORIES (activas) -> SOLO vÃ¡lidas en metric=..., no incluir taps_* ni exits aquÃ­
 METRICS_STORIES = "views,reach,replies"
 
-# Fallbacks mínimos (si falla el batch) — también SIN impressions
+# Fallbacks mÃ­nimos (si falla el batch) â€” tambiÃ©n SIN impressions
 FALLBACK_FEED     = "views,reach,total_interactions"
 FALLBACK_REELS    = "views,reach,total_interactions"
 FALLBACK_STORIES  = "views,reach,replies"
 
-# Mapeo métrica API -> columna tabla
+# Mapeo mÃ©trica API -> columna tabla
 FIELD_MAP = {
     "reach": "reach",
     "views": "views",
@@ -78,10 +78,10 @@ FIELD_MAP = {
     "replies": "replies",
     "plays": "plays",
 
-    # Story navigation → columnas propias (NO shares)
+    # Story navigation â†’ columnas propias (NO shares)
     "tap_forward": "taps_forward",
     "taps_forward": "taps_forward",
-    "swipe_forward": "taps_forward",  # Next story también a taps_forward
+    "swipe_forward": "taps_forward",  # Next story tambiÃ©n a taps_forward
     "tap_back": "taps_back",
     "taps_back": "taps_back",
     "tap_exit": "exits",
@@ -92,7 +92,7 @@ FIELD_MAP = {
     "ig_reels_video_view_total_time": "ig_reels_video_view_total_time_ms",
 }
 
-# Columnas permitidas para upsert (sanitización anti-PGRST204)
+# Columnas permitidas para upsert (sanitizaciÃ³n anti-PGRST204)
 ALLOWED_COLUMNS = {
     "media_id","taken_at","media_product_type",
     "reach","impressions","views","total_interactions",
@@ -101,6 +101,7 @@ ALLOWED_COLUMNS = {
     "ig_reels_avg_watch_time_ms","ig_reels_video_view_total_time_ms",
     "plays","video_duration_sec",
     "comments_total","comments_pos","comments_neu","comments_neg","sentiment_avg_score",
+    "snapshot_horizon",
 }
 
 def _refine_metrics_on_error(metrics_str: str | None, body_text: str | None) -> str | None:
@@ -126,6 +127,87 @@ def sanitize_row_for_upsert(row: dict) -> dict:
     """Elimina llaves que no existan en la tabla (evita PGRST204)."""
     return {k: v for k, v in row.items() if k in ALLOWED_COLUMNS}
 
+
+HORIZON_CONFIG = {
+    'FEED': ('01:00:00', '03:00:00', '06:00:00', '12:00:00', '1 day', '3 days', '7 days', '28 days'),
+    'REELS': ('01:00:00', '03:00:00', '06:00:00', '12:00:00', '1 day', '3 days', '7 days', '28 days'),
+    'STORIES': tuple(f"{i:02d}:00:00" for i in range(1, 24)),
+}
+
+
+def _parse_iso_datetime(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except Exception:
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+
+def _offset_to_hours(offset: str | None) -> float | None:
+    if not offset:
+        return None
+    raw = offset.strip().lower()
+    if not raw:
+        return None
+    try:
+        if 'day' in raw:
+            return float(raw.split()[0]) * 24.0
+        if 'hour' in raw:
+            return float(raw.split()[0])
+        if 'minute' in raw:
+            return float(raw.split()[0]) / 60.0
+        if ':' in raw:
+            parts = raw.split(':')
+            if len(parts) == 3:
+                hh, mm, ss = parts
+                return int(hh) + int(mm) / 60.0 + int(ss) / 3600.0
+    except Exception:
+        return None
+    return None
+
+
+def _infer_snapshot_horizon(surface: str, media_meta: dict | None, taken_at_iso: str) -> dict | None:
+    if not media_meta:
+        return None
+    posted_iso = media_meta.get('timestamp_utc')
+    posted = _parse_iso_datetime(posted_iso)
+    taken_at = _parse_iso_datetime(taken_at_iso) or datetime.now(timezone.utc)
+    if not posted or posted > taken_at:
+        return None
+
+    elapsed_hours = (taken_at - posted).total_seconds() / 3600.0
+    if not math.isfinite(elapsed_hours):
+        return None
+
+    config = HORIZON_CONFIG.get((surface or 'FEED').upper(), HORIZON_CONFIG['FEED'])
+    hours_list = [_offset_to_hours(val) for val in config]
+    candidates = [
+        (abs(elapsed_hours - h), idx)
+        for idx, h in enumerate(hours_list)
+        if h is not None
+    ]
+
+    if not candidates:
+        return None
+
+    _, idx = min(candidates, key=lambda pair: pair[0])
+    label = config[idx] if idx < len(config) else None
+    chosen_hours = hours_list[idx] if idx < len(hours_list) else None
+
+    info = {
+        'label': label,
+        'index': idx,
+        'elapsed_hours': round(elapsed_hours, 3),
+    }
+    if chosen_hours is not None:
+        info['hours'] = round(chosen_hours, 3)
+    return info
+
+
 # ================== HTTP session (keep-alive + retry) ==================
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -143,7 +225,7 @@ SESSION = make_session()
 
 # ================== IG Helpers ==================
 def ig_get(path, params=None, raw_url=False):
-    """GET simple; si raw_url=True usamos la URL completa (paginación 'next')."""
+    """GET simple; si raw_url=True usamos la URL completa (paginaciÃ³n 'next')."""
     if raw_url:
         r = SESSION.get(path, timeout=30)
     else:
@@ -172,7 +254,7 @@ def ig_post(path, data=None):
         raise requests.HTTPError(f"{r.status_code}: {r.text[:300]}")
     return r.json()
 
-# ================== Util — order con nulls first ==================
+# ================== Util â€” order con nulls first ==================
 def order_nulls_first(req, column: str):
     try:
         return req.order(column, desc=False, nullsfirst=True)
@@ -199,7 +281,7 @@ def fetch_candidates_from_db(limit: int) -> list[dict]:
     ]
 
 def fetch_active_stories() -> list[dict]:
-    """Trae STORIES activas (no histórico)."""
+    """Trae STORIES activas (no histÃ³rico)."""
     items = []
     params = {"fields": "id,timestamp", "limit": 100}
     try:
@@ -216,7 +298,7 @@ def fetch_active_stories() -> list[dict]:
         data = ig_get(next_url, raw_url=True)
     return items
 
-# ================== Selector de métricas ==================
+# ================== Selector de mÃ©tricas ==================
 def pick_metrics(surface: str) -> tuple[str, str]:
     s = (surface or "FEED").upper()
     if s == "REELS":   return METRICS_REELS,   FALLBACK_REELS
@@ -244,10 +326,10 @@ def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
     data = payload.get("data") or []
 
     for entry in data:
-        # ---- 1) Formato clásico: values[].breakdowns[] ----
+        # ---- 1) Formato clÃ¡sico: values[].breakdowns[] ----
         values = entry.get("values") or []
         for val_entry in values:
-            # values[].value puede ser dict agregando métricas
+            # values[].value puede ser dict agregando mÃ©tricas
             val_obj = val_entry.get("value")
             if isinstance(val_obj, dict):
                 for key, number in val_obj.items():
@@ -262,7 +344,7 @@ def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
                     if isinstance(val, (int, float)):
                         metrics[key] = val
 
-        # ---- 2) Formato que estás recibiendo: total_value.breakdowns.results[] ----
+        # ---- 2) Formato que estÃ¡s recibiendo: total_value.breakdowns.results[] ----
         total_value = entry.get("total_value") or {}
         for br in (total_value.get("breakdowns") or []):
             for res in (br.get("results") or []):
@@ -368,6 +450,26 @@ def fetch_story_navigation_metrics(media_ids: list[str]) -> dict[str, dict]:
         time.sleep(0.05)
 
     return nav_results
+
+
+def fetch_media_metadata_map(media_ids: list[str]) -> dict[str, dict]:
+    if not media_ids:
+        return {}
+
+    out: dict[str, dict] = {}
+    chunk_size = 200
+    for i in range(0, len(media_ids), chunk_size):
+        chunk = media_ids[i:i + chunk_size]
+        try:
+            res = sb.table("ig_media").select("media_id,timestamp_utc,detected_at").in_("media_id", chunk).execute()
+        except Exception as e:
+            print(f"[WARN] fetch media metadata failed: {e}")
+            continue
+        for row in (res.data or []):
+            mid = row.get("media_id")
+            if mid:
+                out[str(mid)] = row
+    return out
 
 # ================== Batch de insights ==================
 def fetch_insights_batch(items: list[dict]) -> dict:
@@ -498,8 +600,8 @@ def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | No
             print(f"[WARN] single exception media={media_id} metrics={metrics}: {ex}")
     return {}
 
-# ================== Transform → fila ig_media_insights ==================
-def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_duration_sec):
+# ================== Transform â†’ fila ig_media_insights ==================
+def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_duration_sec, media_meta: dict | None):
     now_ts = datetime.now(timezone.utc).isoformat()
     row = {
         "media_id": media_id,
@@ -513,6 +615,7 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
         "video_duration_sec": None,
         "comments_total": None, "comments_pos": None, "comments_neu": None,
         "comments_neg": None, "sentiment_avg_score": None,
+        "snapshot_horizon": None,
     }
     # Mapeo directo
     for name, val in (metrics_dict or {}).items():
@@ -520,7 +623,11 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
         if dest is not None:
             row[dest] = val
 
-    # NO mezclar navegación en shares (semánticamente no corresponde)
+    horizon_info = _infer_snapshot_horizon(surface, media_meta, now_ts)
+    if horizon_info:
+        row["snapshot_horizon"] = horizon_info
+
+    # NO mezclar navegaciÃ³n en shares (semÃ¡nticamente no corresponde)
 
     if video_duration_sec:
         try: row["video_duration_sec"] = float(video_duration_sec)
@@ -590,6 +697,7 @@ def snapshot_insights(max_media: int | None = None) -> int:
         return 0
 
     # 3) pedir insights (batch + fallback)
+    media_meta_map = fetch_media_metadata_map([it["media_id"] for it in items])
     insights_map = fetch_insights_batch(items)
 
     # 4) construir filas y upsert en bloques
@@ -599,7 +707,7 @@ def snapshot_insights(max_media: int | None = None) -> int:
         mdict = insights_map.get(mid, {})
         if not mdict:
             empties += 1
-        row = build_insights_row(mid, surf, mdict, dur)
+        row = build_insights_row(mid, surf, mdict, dur, media_meta_map.get(str(mid)))
         row = sanitize_row_for_upsert(row)  # seguridad extra
         buffer.append(row); processed += 1
 
@@ -613,7 +721,7 @@ def snapshot_insights(max_media: int | None = None) -> int:
         print(f"[DB] Insertados {len(buffer)} snapshots. HTTP calls: {API_CALLS}")
 
     if empties:
-        print(f"[WARN] {empties} medios devolvieron métricas vacías (revisa permisos/superficie).")
+        print(f"[WARN] {empties} medios devolvieron mÃ©tricas vacÃ­as (revisa permisos/superficie).")
 
     return processed
 
@@ -635,4 +743,6 @@ if __name__ == "__main__":
         r = sb.rpc("ig_media_sunset_28d").execute()
         print(f"[DB] Sunset 28d: {r.data} medios apagados")
     except Exception as e:
-        print(f"[WARN] Sunset 28d falló: {e}")
+        print(f"[WARN] Sunset 28d fallÃ³: {e}")
+
+
