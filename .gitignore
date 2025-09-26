@@ -46,3 +46,7 @@ data/
 # --- Mac/Windows ---
 .DS_Store
 Thumbs.db
+
+
+# --- Debug / pruebas ---
+_debug/

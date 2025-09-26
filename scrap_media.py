@@ -770,7 +770,7 @@ def process_active_stories() -> int:
         elif need_meta and media_url:
             try:
                 info = probe_url_dims_and_duration(media_url)
-            except Exception:
+            except Exception: 
                 info = None
 
         row = build_row_from_story(s, storage_path, info)

@@ -103,6 +103,25 @@ ALLOWED_COLUMNS = {
     "comments_total","comments_pos","comments_neu","comments_neg","sentiment_avg_score",
 }
 
+def _refine_metrics_on_error(metrics_str: str | None, body_text: str | None) -> str | None:
+    if not metrics_str or not body_text:
+        return None
+    lowered = body_text.lower()
+    metrics = [m.strip() for m in metrics_str.split(',') if m.strip()]
+    if not metrics:
+        return None
+    new_metrics = list(metrics)
+
+    if any(m.lower() == 'plays' for m in new_metrics):
+        if 'plays metric is no longer supported' in lowered:
+            new_metrics = [m for m in new_metrics if m.lower() != 'plays']
+        elif 'metric[0]' in lowered and 'plays' in lowered and 'must be one of the following' in lowered:
+            new_metrics = [m for m in new_metrics if m.lower() != 'plays']
+
+    if new_metrics == metrics:
+        return None
+    return ','.join(new_metrics) if new_metrics else None
+
 def sanitize_row_for_upsert(row: dict) -> dict:
     """Elimina llaves que no existan en la tabla (evita PGRST204)."""
     return {k: v for k, v in row.items() if k in ALLOWED_COLUMNS}
@@ -426,12 +445,18 @@ def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | No
     """Fallback individual (1 request) priorizando el set completo disponible."""
     global API_CALLS
 
-    attempts: list[str] = []
+    queue: list[str] = []
+    seen: set[str] = set()
     for candidate in (primary_metrics, fallback_str):
-        if candidate and candidate not in attempts:
-            attempts.append(candidate)
+        if not candidate:
+            continue
+        norm = candidate.strip()
+        if norm and norm not in seen:
+            queue.append(norm)
+            seen.add(norm)
 
-    for metrics in attempts:
+    while queue:
+        metrics = queue.pop(0)
         if API_CALLS >= API_BUDGET:
             return {}
         try:
@@ -444,9 +469,21 @@ def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | No
                 time.sleep(60)
                 r = SESSION.get(r.url, timeout=25)
                 API_CALLS += 1
+
             if r.status_code != 200:
-                print(f"[WARN] single HTTP {r.status_code} media={media_id} metrics={metrics}: {r.text[:180]}")
+                body_text = ""
+                try:
+                    body_text = r.text or ""
+                except Exception:
+                    body_text = ""
+                refined = _refine_metrics_on_error(metrics, body_text)
+                if refined and refined not in seen:
+                    seen.add(refined)
+                    queue.insert(0, refined)
+                    continue
+                print(f"[WARN] single HTTP {r.status_code} media={media_id} metrics={metrics}: {body_text[:180]}")
                 continue
+
             data = r.json().get("data", [])
             met = {}
             for e in data:

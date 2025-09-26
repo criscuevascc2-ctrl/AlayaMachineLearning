@@ -45,6 +45,7 @@ _tok = None
 _id2label = None
 _label2id = None
 _input_names = None
+_max_seq_len = None
 
 # === Preprocesador ===
 try:
@@ -73,7 +74,7 @@ except Exception:
         t = _re_lol.sub("jaja", t)
         t = _re_rep.sub(r"\1\1", t)
         t = _emoji_to_words(t)
-        return t.strip()
+        return t.strip() 
 
 # --------- Helpers HF ----------
 def _hf_download(repo_id: str, filename: str) -> str:
@@ -99,7 +100,7 @@ def _ensure_onnx_path() -> str:
                            f"Asegura HF_TOKEN y que el archivo existe. Detalle: {e}")
 
 def _ensure_tokenizer_and_labels():
-    """Obtiene tokenizer.json y labels (id2label) desde tu repo HF o fallback."""
+    """Obtiene tokenizer.json, labels y config desde tu repo HF o fallback."""
     # 1) tokenizer.json
     tok_path = None
     for f in (TOK_FILE1, TOK_FILE2):
@@ -147,25 +148,30 @@ def _ensure_tokenizer_and_labels():
         except Exception:
             cfg_path = None
 
+    cfg_dict = None
     if cfg_path and os.path.exists(cfg_path):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            id2label = cfg.get("id2label") or {}
+                cfg_dict = json.load(f)
+            id2label = cfg_dict.get("id2label") or {}
             # orden por índice numérico
             labels = [id2label[str(i)].upper() for i in range(len(id2label))]
         except Exception:
+            cfg_dict = None
             labels = None
 
     # fallback razonable (orden típico en robertuito)
     if not labels:
         labels = ["NEG", "NEU", "POS"]
 
-    return tok_path, labels
+    if cfg_dict is None:
+        cfg_dict = {}
+
+    return tok_path, labels, cfg_dict
 
 # --------- Carga perezosa ----------
 def _load():
-    global _sess, _tok, _id2label, _label2id, _input_names
+    global _sess, _tok, _id2label, _label2id, _input_names, _max_seq_len
     if _sess is not None:  # ya cargado
         return
 
@@ -177,11 +183,60 @@ def _load():
     _input_names = {i.name for i in _sess.get_inputs()}
 
     # 2) Tokenizer + labels
-    tok_path, labels = _ensure_tokenizer_and_labels()
+    tok_path, labels, cfg_dict = _ensure_tokenizer_and_labels()
     _tok = Tokenizer.from_file(tok_path)
-    _tok.enable_truncation(max_length=MAX_LEN)
-    pad_id = _tok.token_to_id("[PAD]") or _tok.token_to_id("<pad>") or 0
-    _tok.enable_padding(length=MAX_LEN, pad_id=pad_id, pad_token="[PAD]")
+
+    max_pos = None
+    if cfg_dict:
+        try:
+            raw_max = cfg_dict.get("max_position_embeddings")
+            max_pos = int(raw_max) if raw_max is not None else None
+        except (TypeError, ValueError):
+            max_pos = None
+
+    effective_len = MAX_LEN
+    if max_pos:
+        effective_len = min(MAX_LEN, max_pos - 2)
+        if effective_len <= 0:
+            effective_len = min(MAX_LEN, max_pos - 1) or max_pos
+    if effective_len is None or effective_len <= 0:
+        effective_len = max_pos or MAX_LEN or 2
+    _max_seq_len = max(int(effective_len), 2)
+
+    _tok.enable_truncation(max_length=_max_seq_len)
+
+    pad_candidates = []
+    if cfg_dict:
+        pad_token_cfg = cfg_dict.get("pad_token")
+        if pad_token_cfg:
+            pad_candidates.append(pad_token_cfg)
+    pad_candidates.extend(["[PAD]", "<pad>"])
+
+    pad_id = None
+    pad_token = None
+    for cand in pad_candidates:
+        if not cand:
+            continue
+        tid = _tok.token_to_id(cand)
+        if tid is not None:
+            pad_id = tid
+            pad_token = cand
+            break
+    if pad_id is None and cfg_dict:
+        pad_token_id = cfg_dict.get("pad_token_id")
+        if pad_token_id is not None:
+            try:
+                pad_id = int(pad_token_id)
+                resolved = _tok.id_to_token(pad_id)
+                pad_token = resolved or pad_token
+            except (TypeError, ValueError):
+                pad_id = None
+    if pad_id is None:
+        pad_id = 0
+        pad_token = _tok.id_to_token(pad_id) or pad_token or "[PAD]"
+
+    pad_token = pad_token or "[PAD]"
+    _tok.enable_padding(pad_id=pad_id, pad_token=pad_token)
 
     _id2label = {i: lab for i, lab in enumerate(labels)}
     _label2id = {lab: i for i, lab in enumerate(labels)}
