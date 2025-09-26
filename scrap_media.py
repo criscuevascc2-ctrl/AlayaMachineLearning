@@ -57,6 +57,8 @@ BASE = "https://graph.facebook.com/v21.0"
 
 sb: Client = create_client(SB_URL, SB_KEY)
 API_CALLS  = 0
+INITIAL_COUNT_FIELDS = ("like_count_init", "comments_count_init", "saved_count_init", "shared_count_init")
+FROZEN_FIELDS_ONCE = ("video_duration_sec", "media_width", "media_height", "detected_at")
 CUTOFF_UTC = datetime.now(timezone.utc) - timedelta(days=CUTOFF_DAYS)
 
 # ================== Campos del list endpoint (MEDIA) ==================
@@ -499,6 +501,8 @@ def build_row_from_media(m: dict) -> dict:
         "thumbnail_url": m.get("thumbnail_url"),
         "like_count_init": m.get("like_count"),
         "comments_count_init": m.get("comments_count"),
+        "saved_count_init": m.get("saved_count") or m.get("saved"),
+        "shared_count_init": m.get("shared_count") or m.get("shares"),
         "username": m.get("username") or (m.get("owner") or {}).get("username"),
         "is_comment_enabled": m.get("is_comment_enabled"),
         "children_count": len(children) if children else None,
@@ -662,8 +666,29 @@ def backfill_media(max_items: int | None = None) -> int:
             base_row = build_row_from_media(m)
             ex = existing.get(base_row["media_id"])
 
+            if ex:
+                detected_at_prev = ex.get("detected_at")
+                if detected_at_prev:
+                    base_row["detected_at"] = detected_at_prev
+
             # Enriquecer SOLO si faltan datos (y el existente tampoco los tiene)
             base_row = enrich_dims_duration_if_needed(base_row, ex, m)
+
+            if ex:
+                for field in INITIAL_COUNT_FIELDS:
+                    base_row.pop(field, None)
+                for field in FROZEN_FIELDS_ONCE:
+                    prev_val = ex.get(field) if ex else None
+                    if field == "detected_at":
+                        if prev_val:
+                            base_row[field] = prev_val
+                        else:
+                            base_row.pop(field, None)
+                        continue
+                    if prev_val not in (None, 0, 0.0):
+                        base_row[field] = prev_val
+                    elif base_row.get(field) in (None, 0, 0.0):
+                        base_row.pop(field, None)
 
             row_to_send = prune_nulls_for_patch(base_row) if ex else base_row
             if needs_update(ex, row_to_send):
@@ -717,6 +742,7 @@ def build_row_from_story(s: dict, storage_path: str | None, info: dict | None = 
         "media_url_refreshed_at": now_iso,
         "thumbnail_url": s.get("thumbnail_url"),
         "like_count_init": None, "comments_count_init": None,
+        "saved_count_init": None, "shared_count_init": None,
         "username": None, "is_comment_enabled": None,
         "children_count": None, "children_ids": None, "children_media_types": None,
         "children_media_urls": None, "children_thumbnails": None,
@@ -774,6 +800,23 @@ def process_active_stories() -> int:
                 info = None
 
         row = build_row_from_story(s, storage_path, info)
+
+        if prev:
+            for field in INITIAL_COUNT_FIELDS:
+                row.pop(field, None)
+            for field in FROZEN_FIELDS_ONCE:
+                prev_val = prev.get(field) if prev else None
+                if field == "detected_at":
+                    if prev_val:
+                        row[field] = prev_val
+                    else:
+                        row.pop(field, None)
+                    continue
+                if prev_val not in (None, 0, 0.0):
+                    row[field] = prev_val
+                elif row.get(field) in (None, 0, 0.0):
+                    row.pop(field, None)
+
         rows_to_upsert.append(prune_nulls_for_patch(row) if prev else row)
 
     if rows_to_upsert:
