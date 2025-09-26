@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- Archivos de entorno y configuración ---
+.env
+.env.*
+!.env.example
+
+# --- Modelos entrenados / pesos ---
+models/
+checkpoints/
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.onnx
+
+# --- Archivos grandes o de datos ---
+data/
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.parquet
+*.feather
+
+# --- Logs ---
+*.log
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Mac/Windows ---
+.DS_Store
+Thumbs.db

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Demo Predicciones Horizontes</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      width: min(720px, 92vw);
+      background: rgba(15, 23, 42, 0.88);
+      border-radius: 20px;
+      padding: 34px;
+      box-shadow: 0 30px 80px rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(18px);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 2rem;
+      letter-spacing: 0.04em;
+    }
+    p.lead {
+      margin-top: -6px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    form {
+      display: grid;
+      gap: 20px;
+      margin-top: 24px;
+    }
+    label {
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    input[type="text"],
+    input[type="url"],
+    textarea,
+    select,
+    input[type="file"] {
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(15, 23, 42, 0.6);
+      color: inherit;
+      font-size: 1rem;
+      min-height: 48px;
+    }
+    input[type="file"] {
+      padding: 10px 12px;
+    }
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+    .inline {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .inline label {
+      flex: 1 1 220px;
+    }
+    button {
+      margin-top: 12px;
+      padding: 14px 20px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #38bdf8, #6366f1);
+      color: #0f172a;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 30px rgba(99, 102, 241, 0.25);
+    }
+    pre {
+      background: rgba(15, 23, 42, 0.72);
+      padding: 18px;
+      border-radius: 14px;
+      font-size: 0.9rem;
+      overflow-x: auto;
+      max-height: 320px;
+    }
+    .hint {
+      color: #94a3b8;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Predicción Multihorizonte</h1>
+    <p class="lead">
+      Completa los campos para predecir cómo evolucionará un media en los próximos horizontes.
+      Este formulario genera la carga útil para tu backend (por ejemplo, un endpoint FastAPI
+      que invoque <code>OnlineMediaRegressor.predict_for_horizon</code>).
+    </p>
+    <form id="predict-form">
+      <label>
+        Caption / Texto del media
+        <textarea name="caption" placeholder="Describe el contenido, hashtags, menciones..."></textarea>
+      </label>
+      <label>
+        URL de la imagen o video (opcional)
+        <input type="url" name="media_url" placeholder="https://..." />
+      </label>
+      <label>
+        Cargar archivo (imagen o video, opcional)
+        <input type="file" name="media_file" accept="image/*,video/*" />
+        <span class="hint">Si adjuntas un archivo se convertirá a Base64 para enviarlo al servicio de predicción.</span>
+      </label>
+      <div class="inline">
+        <label>
+          Tipo de media
+          <select name="media_product_type">
+            <option value="FEED">Feed (imagen / video)</option>
+            <option value="REELS">Reel</option>
+            <option value="STORIES">Historia</option>
+          </select>
+        </label>
+        <label>
+          ¿Tiene audio?
+          <select name="has_audio">
+            <option value="no">No</option>
+            <option value="si">Sí</option>
+          </select>
+        </label>
+      </div>
+      <label>
+        Horizonte a evaluar
+        <select name="horizon_label">
+          <option value="12h">12 horas</option>
+          <option value="3d">3 días</option>
+          <option value="7d" selected>7 días</option>
+        </select>
+      </label>
+      <button type="submit">Generar carga útil</button>
+    </form>
+    <p class="hint">
+      Conecta este formulario a tu API (por ejemplo, <code>POST /predict</code>) para recibir valores reales del modelo.
+    </p>
+    <pre id="payload">{}</pre>
+  </div>
+  <script>
+  <script>
+    const form = document.getElementById('predict-form');
+    const payloadBox = document.getElementById('payload');
+
+    const readFileAsBase64 = (file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('No fue posible leer el archivo adjunto.'));
+        reader.readAsDataURL(file);
+      });
+    };
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      payloadBox.textContent = 'Generando carga útil…';
+
+      try {
+        const data = new FormData(form);
+        const caption = (data.get('caption') || '').trim();
+        const mediaUrl = (data.get('media_url') || '').trim();
+        const mediaType = data.get('media_product_type');
+        const hasAudio = data.get('has_audio') === 'si';
+        const horizonLabel = data.get('horizon_label');
+
+        const fileInput = form.elements.namedItem('media_file');
+        const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+
+        let filePayload = null;
+        if (file && file.size > 0) {
+          const base64 = await readFileAsBase64(file);
+          filePayload = {
+            file_name: file.name,
+            mime_type: file.type,
+            size_bytes: file.size,
+            data_url: base64,
+          };
+        }
+
+        const payload = {
+          media_product_type: mediaType,
+          caption: caption || null,
+          media_url: mediaUrl || null,
+          has_audio,
+          timestamp_utc: new Date().toISOString(),
+          horizon_label: horizonLabel,
+          media_file: filePayload,
+        };
+
+        payloadBox.textContent = JSON.stringify(payload, null, 2);
+      } catch (error) {
+        console.error(error);
+        payloadBox.textContent = JSON.stringify({ error: error.message }, null, 2);
+      }
+    });
+  </script>
+  </script>
+</body>
+</html>
