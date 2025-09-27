@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
 
 try:
     import video_embed
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover 
     video_embed = None
 
 TARGETS = [

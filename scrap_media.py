@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-Backfill IG Media (rápido y liviano) + Stories cache en Supabase Storage (TTL 14 días).
+Backfill IG Media (rÃ¡pido y liviano) + Stories cache en Supabase Storage (TTL 14 dÃ­as).
 Optimizado para:
 - NO descargar assets salvo que FALTEN video_duration_sec / media_width / media_height.
-- REELS/VIDEO: la duración SOLO se calcula desde un URL de video (jamás thumbnail).
-- Carruseles: width/height del primer hijo con datos; duración del primer hijo de video (o máxima si CAROUSEL_DURATION_MODE=max).
+- REELS/VIDEO: la duraciÃ³n SOLO se calcula desde un URL de video (jamÃ¡s thumbnail).
+- Carruseles: width/height del primer hijo con datos; duraciÃ³n del primer hijo de video (o mÃ¡xima si CAROUSEL_DURATION_MODE=max).
 - Patch parcial: no sobreescribe con NULL.
 
 Requisitos:
@@ -44,10 +44,10 @@ STORIES_BUCKET   = os.getenv("STORIES_BUCKET", "Historias")
 STORIES_TTL_DAYS = int(os.getenv("STORIES_TTL_DAYS", "90"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "60"))
 
-# Límite opcional para evitar descargar archivos gigantes (0 = sin límite)
+# LÃ­mite opcional para evitar descargar archivos gigantes (0 = sin lÃ­mite)
 PROBE_MAX_BYTES  = int(os.getenv("IG_PROBE_MAX_BYTES", "0"))
 
-# Carrusel: duración rápida (primer video) o exacta (máxima) -> "first" | "max"
+# Carrusel: duraciÃ³n rÃ¡pida (primer video) o exacta (mÃ¡xima) -> "first" | "max"
 CAROUSEL_DURATION_MODE = (os.getenv("CAROUSEL_DURATION_MODE", "first") or "first").lower()
 
 assert IG_USER_ID and IG_TOKEN and SB_URL and SB_KEY, "Faltan variables de entorno."
@@ -72,9 +72,9 @@ FIELDS_MEDIA = ",".join([
 
 # ================== Regex & parse ==================
 _WS = "\u00A0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u202F\u205F\u3000"
-_PUNCT_STRIP = ".,!?:;…“”\"'»«()[]{}<>"
-_RE_HASHTAG = re.compile(r"(?<!\w)#([A-Za-z0-9_ÁÉÍÓÚÜÑáéíóúüñ]+)", re.UNICODE)
-_RE_MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_\.ÁÉÍÓÚÜÑáéíóúüñ]+)", re.UNICODE)
+_PUNCT_STRIP = ".,!?:;â€¦â€œâ€\"'Â»Â«()[]{}<>"
+_RE_HASHTAG = re.compile(r"(?<!\w)#([A-Za-z0-9_ÃÃ‰ÃÃ“ÃšÃœÃ‘Ã¡Ã©Ã­Ã³ÃºÃ¼Ã±]+)", re.UNICODE)
+_RE_MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_\.ÃÃ‰ÃÃ“ÃšÃœÃ‘Ã¡Ã©Ã­Ã³ÃºÃ¼Ã±]+)", re.UNICODE)
 
 def normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFC", s)
@@ -156,14 +156,14 @@ def select_existing_subset(ids: list[str]) -> dict:
     if not ids:
         return {}
     res = sb.table("ig_media") \
-        .select("media_id,hashtags,mentions,caption_lang,video_duration_sec,media_width,media_height,storage_path,media_product_type,timestamp_utc,media_url,media_url_refreshed_at") \
+        .select("media_id,hashtags,mentions,caption_lang,video_duration_sec,media_width,media_height,storage_path,media_product_type,timestamp_utc,media_url,media_url_refreshed_at,detected_at,last_seen_at") \
         .in_("media_id", ids).execute()
     out = {}
     for row in (res.data or []):
         out[row["media_id"]] = row
     return out
 
-# ================== PROBE (RAM) Imágenes/Vídeos ==================
+# ================== PROBE (RAM) ImÃ¡genes/VÃ­deos ==================
 try:
     from PIL import Image
     _PIL_OK = True
@@ -373,7 +373,7 @@ def probe_url_dims_and_duration(url: str) -> dict:
         mp4 = probe_mp4_info(b)
         info.update({k: mp4.get(k) for k in ("width","height","duration")})
     else:
-        # Heurística: intenta imagen; si no, mp4
+        # HeurÃ­stica: intenta imagen; si no, mp4
         w, h = probe_image_dims(b)
         if not (w and h):
             mp4 = probe_mp4_info(b)
@@ -510,7 +510,7 @@ def build_row_from_media(m: dict) -> dict:
         "children_media_types": [c.get("media_type") for c in children] or None,
         "children_media_urls": [c.get("media_url") for c in children] or None,
         "children_thumbnails": [c.get("thumbnail_url") for c in children] or None,
-        "video_duration_sec": _coerce_duration(m.get("video_duration")),  # ← normaliza a float
+        "video_duration_sec": _coerce_duration(m.get("video_duration")),  # â† normaliza a float
         "media_width": m.get("width"),
         "media_height": m.get("height"),
         "storage_path": None,
@@ -527,8 +527,8 @@ def build_row_from_media(m: dict) -> dict:
 def enrich_dims_duration_if_needed(row: dict, existing: dict | None, m: dict):
     """
     SOLO descarga si faltan datos.
-    - Duración SOLO desde un URL de video (no thumbnail).
-    - Carrusel: dims del primer hijo con datos; duración del primer hijo de video (o máxima).
+    - DuraciÃ³n SOLO desde un URL de video (no thumbnail).
+    - Carrusel: dims del primer hijo con datos; duraciÃ³n del primer hijo de video (o mÃ¡xima).
     """
     e = existing or {}
     need_w = (row.get("media_width")  in (None, 0)) and not e.get("media_width")
@@ -567,7 +567,7 @@ def enrich_dims_duration_if_needed(row: dict, existing: dict | None, m: dict):
                 except Exception:
                     continue
 
-        # 2) Duración: primer video (o máximo) usando SOLO media_url de video
+        # 2) DuraciÃ³n: primer video (o mÃ¡ximo) usando SOLO media_url de video
         if need_d:
             if CAROUSEL_DURATION_MODE == "max":
                 max_d = None
@@ -602,10 +602,10 @@ def enrich_dims_duration_if_needed(row: dict, existing: dict | None, m: dict):
         return row
 
     # No carrusel (FEED/REELS/VIDEO/IMAGE)
-    # Para duración: solo desde media_url si el padre es video (VIDEO/REELS).
+    # Para duraciÃ³n: solo desde media_url si el padre es video (VIDEO/REELS).
     video_url = (m.get("media_url") or row.get("media_url")) if is_parent_video else None
 
-    # Si necesitamos duración y hay URL de video → una sola descarga y aplicamos todo lo posible
+    # Si necesitamos duraciÃ³n y hay URL de video â†’ una sola descarga y aplicamos todo lo posible
     if need_d and video_url:
         try:
             info = probe_url_dims_and_duration(video_url)
@@ -614,13 +614,13 @@ def enrich_dims_duration_if_needed(row: dict, existing: dict | None, m: dict):
         except Exception:
             pass
 
-    # Si aún faltan width/height, probamos con media_url o thumbnail (solo para dims)
+    # Si aÃºn faltan width/height, probamos con media_url o thumbnail (solo para dims)
     if (need_w or need_h):
         img_url = row.get("media_url") or m.get("media_url") or row.get("thumbnail_url") or m.get("thumbnail_url")
         if img_url:
             try:
                 info = probe_url_dims_and_duration(img_url)
-                apply_info(info, apply_w=True, apply_h=True, apply_d=False)  # NUNCA duración desde thumbnail
+                apply_info(info, apply_w=True, apply_h=True, apply_d=False)  # NUNCA duraciÃ³n desde thumbnail
             except Exception:
                 pass
     return row
@@ -702,7 +702,7 @@ def backfill_media(max_items: int | None = None) -> int:
     for m in ig_paginate_items(f"{IG_USER_ID}/media", params=params):
         ts_utc = to_utc_iso(m["timestamp"])
         if datetime.fromisoformat(ts_utc) < CUTOFF_UTC:
-            print("\n[INFO] Límite de fecha alcanzado.")
+            print("\n[INFO] LÃ­mite de fecha alcanzado.")
             break
         m_batch.append(m)
         if len(m_batch) >= BATCH_SIZE:
@@ -843,6 +843,6 @@ if __name__ == "__main__":
         print("="*60)
 
     except Exception as e:
-        print(f"\n[ERROR] El script falló: {e}")
+        print(f"\n[ERROR] El script fallÃ³: {e}")
         raise
 
