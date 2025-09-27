@@ -1,15 +1,15 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Snapshot de Insights (Instagram Graph API v23.0) con Batch + fallback.
 - Selecciona candidatos desde la VISTA v_ig_media_due (vencidos + >28d sin snapshot).
-- Pide insights por BATCH (mÃ¡x 50 sub-requests por POST).
-- Si un sub-request falla, hace 1 GET individual con set mÃ­nimo por superficie.
+- Pide insights por BATCH (máx 50 sub-requests por POST).
+- Si un sub-request falla, hace 1 GET individual con set mínimo por superficie.
 - Guarda en public.ig_media_insights (PK: media_id, taken_at).
-- Al final, ejecuta el RPC ig_media_sunset_28d() para â€œapagarâ€ >28d con snapshot.
+- Al final, ejecuta el RPC ig_media_sunset_28d() para “apagar” >28d con snapshot.
 
 Requisitos:
   pip install python-dotenv requests supabase python-dateutil
-Permisos mÃ­nimos:
+Permisos mínimos:
   instagram_basic, instagram_manage_insights
 """
 
@@ -30,16 +30,16 @@ IG_TOKEN   = (os.getenv("IG_ACCESS_TOKEN") or "").strip()
 SB_URL     = (os.getenv("SUPABASE_URL") or "").strip()
 SB_KEY     = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
-# Ventana histÃ³rica solo se usa para otras rutas; aquÃ­ trabajamos con la vista due
+# Ventana histórica solo se usa para otras rutas; aquí trabajamos con la vista due
 CUTOFF_DAYS = int(os.getenv("INSIGHTS_CUTOFF_DAYS", "30"))
 
 # Presupuesto de llamadas HTTP (POST batch cuenta 1; GET fallback cuenta 1)
 API_BUDGET  = int(os.getenv("INSIGHTS_API_BUDGET", "180"))
 
-# MÃ¡ximo de medios a procesar en esta corrida
+# Máximo de medios a procesar en esta corrida
 MAX_MEDIA   = int(os.getenv("INSIGHTS_MAX_MEDIA", "1200"))
 
-# TamaÃ±o de batch Graph (mÃ¡x 50)
+# Tamaño de batch Graph (máx 50)
 BATCH_SIZE  = min(int(os.getenv("GRAPH_BATCH_SIZE", "50")), 50)
 
 # Graph API v23.0
@@ -50,22 +50,22 @@ assert IG_USER_ID and IG_TOKEN and SB_URL and SB_KEY, "Faltan IG_USER_ID / IG_AC
 sb: Client = create_client(SB_URL, SB_KEY)
 API_CALLS = 0
 
-# ================== MÃ‰TRICAS por superficie (SIN 'impressions' en v22+) ==================
+# ================== MÉTRICAS por superficie (SIN 'impressions' en v22+) ==================
 # FEED (imagen o video no-reels)
 METRICS_FEED    = "views,reach,total_interactions,saved,likes,comments,shares"
 
 # REELS (video)
 METRICS_REELS   = "views,reach,total_interactions,saved,likes,comments,shares,ig_reels_avg_watch_time,ig_reels_video_view_total_time,plays"
 
-# STORIES (activas) -> SOLO vÃ¡lidas en metric=..., no incluir taps_* ni exits aquÃ­
+# STORIES (activas) -> SOLO válidas en metric=..., no incluir taps_* ni exits aquí
 METRICS_STORIES = "views,reach,replies"
 
-# Fallbacks mÃ­nimos (si falla el batch) â€” tambiÃ©n SIN impressions
+# Fallbacks mínimos (si falla el batch) — también SIN impressions
 FALLBACK_FEED     = "views,reach,total_interactions"
 FALLBACK_REELS    = "views,reach,total_interactions"
 FALLBACK_STORIES  = "views,reach,replies"
 
-# Mapeo mÃ©trica API -> columna tabla
+# Mapeo métrica API -> columna tabla
 FIELD_MAP = {
     "reach": "reach",
     "views": "views",
@@ -78,10 +78,10 @@ FIELD_MAP = {
     "replies": "replies",
     "plays": "plays",
 
-    # Story navigation â†’ columnas propias (NO shares)
+    # Story navigation → columnas propias (NO shares)
     "tap_forward": "taps_forward",
     "taps_forward": "taps_forward",
-    "swipe_forward": "taps_forward",  # Next story tambiÃ©n a taps_forward
+    "swipe_forward": "taps_forward",  # Next story también a taps_forward
     "tap_back": "taps_back",
     "taps_back": "taps_back",
     "tap_exit": "exits",
@@ -92,7 +92,7 @@ FIELD_MAP = {
     "ig_reels_video_view_total_time": "ig_reels_video_view_total_time_ms",
 }
 
-# Columnas permitidas para upsert (sanitizaciÃ³n anti-PGRST204)
+# Columnas permitidas para upsert (sanitización anti-PGRST204)
 ALLOWED_COLUMNS = {
     "media_id","taken_at","media_product_type",
     "reach","impressions","views","total_interactions",
@@ -225,7 +225,7 @@ SESSION = make_session()
 
 # ================== IG Helpers ==================
 def ig_get(path, params=None, raw_url=False):
-    """GET simple; si raw_url=True usamos la URL completa (paginaciÃ³n 'next')."""
+    """GET simple; si raw_url=True usamos la URL completa (paginación 'next')."""
     if raw_url:
         r = SESSION.get(path, timeout=30)
     else:
@@ -254,7 +254,7 @@ def ig_post(path, data=None):
         raise requests.HTTPError(f"{r.status_code}: {r.text[:300]}")
     return r.json()
 
-# ================== Util â€” order con nulls first ==================
+# ================== Util — order con nulls first ==================
 def order_nulls_first(req, column: str):
     try:
         return req.order(column, desc=False, nullsfirst=True)
@@ -281,7 +281,7 @@ def fetch_candidates_from_db(limit: int) -> list[dict]:
     ]
 
 def fetch_active_stories() -> list[dict]:
-    """Trae STORIES activas (no histÃ³rico)."""
+    """Trae STORIES activas (no histórico)."""
     items = []
     params = {"fields": "id,timestamp", "limit": 100}
     try:
@@ -298,7 +298,7 @@ def fetch_active_stories() -> list[dict]:
         data = ig_get(next_url, raw_url=True)
     return items
 
-# ================== Selector de mÃ©tricas ==================
+# ================== Selector de métricas ==================
 def pick_metrics(surface: str) -> tuple[str, str]:
     s = (surface or "FEED").upper()
     if s == "REELS":   return METRICS_REELS,   FALLBACK_REELS
@@ -326,10 +326,10 @@ def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
     data = payload.get("data") or []
 
     for entry in data:
-        # ---- 1) Formato clÃ¡sico: values[].breakdowns[] ----
+        # ---- 1) Formato clásico: values[].breakdowns[] ----
         values = entry.get("values") or []
         for val_entry in values:
-            # values[].value puede ser dict agregando mÃ©tricas
+            # values[].value puede ser dict agregando métricas
             val_obj = val_entry.get("value")
             if isinstance(val_obj, dict):
                 for key, number in val_obj.items():
@@ -344,7 +344,7 @@ def parse_story_navigation_metrics(payload: dict | None) -> dict[str, int]:
                     if isinstance(val, (int, float)):
                         metrics[key] = val
 
-        # ---- 2) Formato que estÃ¡s recibiendo: total_value.breakdowns.results[] ----
+        # ---- 2) Formato que estás recibiendo: total_value.breakdowns.results[] ----
         total_value = entry.get("total_value") or {}
         for br in (total_value.get("breakdowns") or []):
             for res in (br.get("results") or []):
@@ -600,7 +600,7 @@ def fetch_insights_single(media_id: str, surface: str, primary_metrics: str | No
             print(f"[WARN] single exception media={media_id} metrics={metrics}: {ex}")
     return {}
 
-# ================== Transform â†’ fila ig_media_insights ==================
+# ================== Transform → fila ig_media_insights ==================
 def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_duration_sec, media_meta: dict | None):
     now_ts = datetime.now(timezone.utc).isoformat()
     row = {
@@ -627,7 +627,7 @@ def build_insights_row(media_id: str, surface: str, metrics_dict: dict, video_du
     if horizon_info:
         row["snapshot_horizon"] = horizon_info
 
-    # NO mezclar navegaciÃ³n en shares (semÃ¡nticamente no corresponde)
+    # NO mezclar navegación en shares (semánticamente no corresponde)
 
     if video_duration_sec:
         try: row["video_duration_sec"] = float(video_duration_sec)
@@ -654,6 +654,17 @@ def upsert_insights_rows(rows: list[dict]):
                 message = str(payload or e)
             message_lower = message.lower()
             if "muy temprano" in message_lower:
+                match = re.search(r"media\s+(\d+)", message)
+                media_id = match.group(1) if match else None
+                if not media_id and remaining:
+                    media_id = str(remaining[0].get("media_id"))
+                if media_id:
+                    print(f"[WARN] skip snapshot media={media_id}: {message}")
+                    remaining = [r for r in remaining if str(r.get("media_id")) != str(media_id)]
+                    if not remaining:
+                        return
+                    continue
+            if "ya complet" in message_lower and "snapshot" in message_lower:
                 match = re.search(r"media\s+(\d+)", message)
                 media_id = match.group(1) if match else None
                 if not media_id and remaining:
@@ -721,7 +732,7 @@ def snapshot_insights(max_media: int | None = None) -> int:
         print(f"[DB] Insertados {len(buffer)} snapshots. HTTP calls: {API_CALLS}")
 
     if empties:
-        print(f"[WARN] {empties} medios devolvieron mÃ©tricas vacÃ­as (revisa permisos/superficie).")
+        print(f"[WARN] {empties} medios devolvieron métricas vacías (revisa permisos/superficie).")
 
     return processed
 
@@ -743,6 +754,6 @@ if __name__ == "__main__":
         r = sb.rpc("ig_media_sunset_28d").execute()
         print(f"[DB] Sunset 28d: {r.data} medios apagados")
     except Exception as e:
-        print(f"[WARN] Sunset 28d fallÃ³: {e}")
+        print(f"[WARN] Sunset 28d falló: {e}")
 
 
