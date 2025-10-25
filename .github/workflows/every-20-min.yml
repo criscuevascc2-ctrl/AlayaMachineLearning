@@ -2,7 +2,7 @@ name: every-20-min
 
 on:
   schedule:
-    - cron: "1/20 * * * *"   # 01,21,41 UTC (si quieres 00,20,40 cambia a */20)
+    - cron: "1/25 * * * *"   # 01,21,41 UTC (si quieres 00,20,40 cambia a */20) cada 25 min para ahorrar
   workflow_dispatch:
 
 concurrency:
