@@ -1,7 +1,13 @@
 # Core
 requests==2.32.5
 python-dotenv==1.1.1
-supabase==2.19.0
+
+# Supabase SDK estable (con dependencias explícitas)
+supabase==2.3.0
+gotrue==2.4.0
+postgrest==0.13.0
+storage3==0.5.0
+# realtime no es necesario si no usas websockets
 
 # Sentimiento (ONNX, sin Transformers)
 onnxruntime==1.22.1
@@ -9,7 +15,7 @@ numpy==2.3.3
 tokenizers==0.21.4
 huggingface-hub==0.35.0
 
-# Opcionales (según features que quieras)
-pillow==11.3.0        # acelerar detección de dimensiones de imagen (scrap_media)
-emoji==2.14.1         # mejor manejo de emojis en el preprocess del sentimiento
-redis>=5               # solo si usas los contadores de DM en Redis (cuenta_din)
+# Opcionales
+pillow==11.3.0
+emoji==2.14.1
+redis==5.0.1
