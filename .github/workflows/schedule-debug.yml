@@ -3,7 +3,7 @@ name: schedule-debug
 on:
   schedule:
     - cron: "1/20 * * * *"   # :01, :21, :41 UTC
-  workflow_dispatch:          # permite correrlo a mano
+  workflow_dispatch:          # permite correrlo a mano 111
 
 permissions:
   actions: read
